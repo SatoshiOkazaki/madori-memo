@@ -37,8 +37,17 @@
       <button class="tb" type="button" data-walltool="eraser">消しゴム</button>
     </div>
 
+    <!-- 壁線の線種（壁線ツール選択時のみ表示） -->
+    <div class="tb-group" id="wallStyles" role="group" aria-label="壁線の線種">
+      <button class="tb" type="button" data-wallstyle="normal">通常</button>
+      <button class="tb" type="button" data-wallstyle="thin">細線</button>
+      <button class="tb" type="button" data-wallstyle="dash">点線</button>
+    </div>
+
     <!-- 選択中の操作 -->
     <div class="tb-group" id="selActions" role="group" aria-label="選択操作">
+      <button id="btnWMinus" class="tb" type="button" disabled>幅−</button>
+      <button id="btnWPlus" class="tb" type="button" disabled>幅＋</button>
       <button id="btnRotate" class="tb" type="button" disabled>回転90°</button>
       <button id="btnFlipH" class="tb" type="button" disabled>吊元反転</button>
       <button id="btnFlipV" class="tb" type="button" disabled>開き反転</button>

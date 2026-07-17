@@ -40,7 +40,7 @@ const COLOR_ARC = '#6b7280';
 const COLOR_SELECT = '#2563eb';
 
 /* ===== 2. 状態（データモデル） =====
- * state.walls    : [{id, x1, y1, x2, y2}]                     … 壁（線分）
+ * state.walls    : [{id, x1, y1, x2, y2, style?}]             … 壁（線分。style: 'thin'|'dash'、未定義=通常の太線）
  * state.parts    : [{id, type:'door'|'slide'|'window',
  *                    x, y, angle(度), width,
  *                    flipH?, flipV?}]                          … 建具パーツ（中心+角度。
@@ -54,6 +54,7 @@ let settings = { grid: true, memoVisible: true };
 let ui = {
   mode: 'wall',        // 'wall' | 'memo'
   wallTool: 'wall',    // 'wall' | 'part' | 'furniture' | 'select' | 'eraser'
+  wallStyle: 'normal', // 'normal'(太実線) | 'thin'(細実線) | 'dash'(細点線)
   partType: 'door',    // 'door' | 'slide' | 'window'
   memoTool: 'pen',     // 'pen' | 'eraser'
   memoColor: '#111111',
@@ -294,8 +295,9 @@ function drawScene(c, tf, opts) {
   // 壁
   for (const w of state.walls) {
     const isSel = sel && sel.kind === 'wall' && sel.id === w.id;
-    drawWallLine(c, tf, w, COLOR_WALL, WALL_W);
-    if (isSel) drawWallLine(c, tf, w, 'rgba(37,99,235,0.45)', WALL_W + 8);
+    const wp = wallDrawParams(w);
+    drawWallLine(c, tf, w, COLOR_WALL, wp.width, wp.dash);
+    if (isSel) drawWallLine(c, tf, w, 'rgba(37,99,235,0.45)', wp.width + 8);
   }
   // 家具（細線枠。壁の上に重ねる）
   for (const f of state.furniture) {
@@ -311,12 +313,20 @@ function drawScene(c, tf, opts) {
   }
 }
 
-function drawWallLine(c, tf, w, color, width) {
+function drawWallLine(c, tf, w, color, width, dash) {
   const a = w2s(tf, w.x1, w.y1), b = w2s(tf, w.x2, w.y2);
   c.strokeStyle = color;
   c.lineWidth = width * tf.scale;
   c.lineCap = 'round';
+  if (dash) c.setLineDash([10 * tf.scale, 8 * tf.scale]);
   c.beginPath(); c.moveTo(a.x, a.y); c.lineTo(b.x, b.y); c.stroke();
+  c.setLineDash([]);
+}
+
+// 壁の線種 → 描画パラメータ（style未定義=通常の太線。旧データ互換）
+function wallDrawParams(w) {
+  const thin = w.style === 'thin' || w.style === 'dash';
+  return { width: thin ? 2 : WALL_W, dash: w.style === 'dash' };
 }
 
 function drawStroke(c, tf, s) {
@@ -452,7 +462,8 @@ function drawHandles(c, tf) {
 function drawOverlay(c, tf) {
   if (!drag) return;
   if (drag.type === 'wall' && drag.preview) {
-    drawWallLine(c, tf, drag.preview, 'rgba(55,65,81,0.55)', WALL_W);
+    const wp = wallDrawParams({ style: ui.wallStyle === 'normal' ? undefined : ui.wallStyle });
+    drawWallLine(c, tf, drag.preview, 'rgba(55,65,81,0.55)', wp.width, wp.dash);
   }
   if (drag.type === 'stroke' && drag.points.length >= 4) {
     drawStroke(c, tf, { color: ui.memoColor, width: ui.memoWidth, dash: ui.memoDash, points: drag.points });
@@ -772,7 +783,9 @@ function endTool(p, w) {
       const wall = snapWallStroke(drag.sx, drag.sy, w.x, w.y);
       if (wall) {
         pushHistory();
-        state.walls.push({ id: nextId(), ...wall });
+        const nw = { id: nextId(), ...wall };
+        if (ui.wallStyle !== 'normal') nw.style = ui.wallStyle;
+        state.walls.push(nw);
         saveSoon();
       }
       break;
@@ -953,6 +966,16 @@ function deleteSelection() {
   afterMutation();
 }
 
+// 選択中パーツの幅をボタンで増減（10刻み・最小30）
+function nudgeWidth(delta) {
+  if (!selection || selection.kind !== 'part') return;
+  const p = state.parts.find(o => o.id === selection.id);
+  if (!p) return;
+  pushHistory();
+  p.width = Math.max(MIN_PART_W, p.width + delta);
+  afterMutation();
+}
+
 // ドアの反転（prop: 'flipH'=吊元左右, 'flipV'=開き内外）。選択中のドアのみ有効
 function flipSelection(prop) {
   if (!selection || selection.kind !== 'part') return;
@@ -1039,6 +1062,7 @@ async function exportPNG() {
 /* ===== 12. UI（ツールバー） ===== */
 const $ = id => document.getElementById(id);
 const wallToolBtns = [...document.querySelectorAll('[data-walltool]')];
+const wallStyleBtns = [...document.querySelectorAll('[data-wallstyle]')];
 const partBtns = [...document.querySelectorAll('[data-part]')];
 const memoToolBtns = [...document.querySelectorAll('[data-memotool]')];
 const colorBtns = [...document.querySelectorAll('[data-color]')];
@@ -1050,8 +1074,12 @@ function updateToolbar() {
   $('modeWall').classList.toggle('active', wallMode);
   $('modeMemo').classList.toggle('active', !wallMode);
   $('wallTools').hidden = !wallMode;
+  $('wallStyles').hidden = !wallMode || ui.wallTool !== 'wall';
   $('selActions').hidden = !wallMode;
   $('memoTools').hidden = wallMode;
+
+  for (const b of wallStyleBtns)
+    b.classList.toggle('active', ui.wallStyle === b.dataset.wallstyle);
 
   for (const b of wallToolBtns)
     b.classList.toggle('active', wallMode && ui.wallTool === b.dataset.walltool);
@@ -1074,6 +1102,8 @@ function updateToolbar() {
   $('btnUndo').disabled = undoStack.length === 0;
   $('btnRedo').disabled = redoStack.length === 0;
   $('btnRotate').disabled = !selection;
+  $('btnWMinus').disabled = !selPart;
+  $('btnWPlus').disabled = !selPart;
   $('btnFlipH').disabled = !isDoor;
   $('btnFlipV').disabled = !isDoor;
   $('btnDelete').disabled = !selection;
@@ -1087,6 +1117,8 @@ function bindUI() {
 
   for (const b of wallToolBtns)
     b.addEventListener('click', () => { ui.wallTool = b.dataset.walltool; selection = null; updateToolbar(); requestRender(); });
+  for (const b of wallStyleBtns)
+    b.addEventListener('click', () => { ui.wallTool = 'wall'; ui.wallStyle = b.dataset.wallstyle; selection = null; updateToolbar(); requestRender(); });
   for (const b of partBtns)
     b.addEventListener('click', () => { ui.wallTool = 'part'; ui.partType = b.dataset.part; selection = null; updateToolbar(); requestRender(); });
   for (const b of memoToolBtns)
@@ -1101,6 +1133,8 @@ function bindUI() {
   $('btnUndo').addEventListener('click', undo);
   $('btnRedo').addEventListener('click', redo);
   $('btnRotate').addEventListener('click', rotateSelection);
+  $('btnWMinus').addEventListener('click', () => nudgeWidth(-PART_W_STEP));
+  $('btnWPlus').addEventListener('click', () => nudgeWidth(PART_W_STEP));
   $('btnFlipH').addEventListener('click', () => flipSelection('flipH'));
   $('btnFlipV').addEventListener('click', () => flipSelection('flipV'));
   $('btnDelete').addEventListener('click', deleteSelection);
