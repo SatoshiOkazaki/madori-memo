@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>間取りメモ</title>
+  <meta name="description" content="iPad + Apple Pencil で間取り図を簡易作成するメモアプリ">
+  <meta name="theme-color" content="#ffffff">
+  <!-- iOS PWA -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="間取りメモ">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== ツールバー ===== -->
+  <header id="toolbar">
+    <!-- モード切替 -->
+    <div class="tb-group" role="group" aria-label="レイヤー切替">
+      <button id="modeWall" class="tb mode-btn" type="button">壁</button>
+      <button id="modeMemo" class="tb mode-btn" type="button">メモ</button>
+    </div>
+
+    <!-- 壁レイヤーのツール -->
+    <div class="tb-group" id="wallTools" role="group" aria-label="壁ツール">
+      <button class="tb" type="button" data-walltool="wall">壁線</button>
+      <button class="tb" type="button" data-part="door">ドア</button>
+      <button class="tb" type="button" data-part="slide">引き戸</button>
+      <button class="tb" type="button" data-part="window">窓</button>
+      <button class="tb" type="button" data-walltool="select">選択</button>
+      <button class="tb" type="button" data-walltool="eraser">消しゴム</button>
+    </div>
+
+    <!-- 選択中の操作 -->
+    <div class="tb-group" id="selActions" role="group" aria-label="選択操作">
+      <button id="btnRotate" class="tb" type="button" disabled>回転90°</button>
+      <button id="btnDelete" class="tb danger" type="button" disabled>削除</button>
+    </div>
+
+    <!-- メモレイヤーのツール -->
+    <div class="tb-group" id="memoTools" role="group" aria-label="メモツール" hidden>
+      <button class="tb" type="button" data-memotool="pen">ペン</button>
+      <button class="tb" type="button" data-memotool="eraser">消しゴム</button>
+      <span class="tb-sep"></span>
+      <button class="tb swatch" type="button" data-color="#111111" style="--sw:#111111" aria-label="黒"></button>
+      <button class="tb swatch" type="button" data-color="#dc2626" style="--sw:#dc2626" aria-label="赤"></button>
+      <button class="tb swatch" type="button" data-color="#2563eb" style="--sw:#2563eb" aria-label="青"></button>
+      <button class="tb swatch" type="button" data-color="#16a34a" style="--sw:#16a34a" aria-label="緑"></button>
+      <span class="tb-sep"></span>
+      <button class="tb" type="button" data-penwidth="3">細</button>
+      <button class="tb" type="button" data-penwidth="8">太</button>
+    </div>
+
+    <!-- 共通 -->
+    <div class="tb-group" role="group" aria-label="共通操作">
+      <button id="btnUndo" class="tb" type="button" disabled aria-label="元に戻す">↩︎</button>
+      <button id="btnRedo" class="tb" type="button" disabled aria-label="やり直す">↪︎</button>
+      <span class="tb-sep"></span>
+      <button id="btnGrid" class="tb" type="button">グリッド</button>
+      <button id="btnMemoVis" class="tb" type="button">メモ表示</button>
+      <button id="btnResetView" class="tb" type="button">表示リセット</button>
+      <span class="tb-sep"></span>
+      <button id="btnExport" class="tb" type="button">画像で保存</button>
+      <button id="btnClear" class="tb danger" type="button">全消去</button>
+    </div>
+  </header>
+
+  <!-- ===== キャンバス ===== -->
+  <main id="stage">
+    <canvas id="canvas"></canvas>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
