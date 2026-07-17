@@ -592,6 +592,21 @@ function startTool(pointerId, p, w) {
         drag = { type: 'wall', pointerId, sx: w.x, sy: w.y, preview: null };
         break;
       case 'part': {
+        // パーツツールのまま既存パーツを調整できる（ハンドル > 既存パーツ > 新規配置）
+        const h = hitHandle(w.x, w.y);
+        if (h && h.kind === 'part') {
+          const f = rotatePt(-h.sgn * h.obj.width / 2, 0, h.obj.angle);
+          drag = { type: 'resizePart', pointerId, part: h.obj, sgn: h.sgn,
+                   fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+          break;
+        }
+        const part = hitPart(w.x, w.y);
+        if (part) {
+          selection = { kind: 'part', id: part.id };
+          drag = { type: 'movePart', pointerId, part, offX: w.x - part.x, offY: w.y - part.y, started: false };
+          updateToolbar();
+          break;
+        }
         const pos = snapPart(w.x, w.y, 0);
         drag = { type: 'placePart', pointerId, pos };
         break;
@@ -765,7 +780,11 @@ function endTool(p, w) {
     case 'placePart': {
       const pos = snapPart(w.x, w.y, 0);
       pushHistory();
-      state.parts.push({ id: nextId(), type: ui.partType, x: pos.x, y: pos.y, angle: pos.angle, width: PART_W });
+      const np = { id: nextId(), type: ui.partType, x: pos.x, y: pos.y, angle: pos.angle, width: PART_W };
+      state.parts.push(np);
+      // 配置直後に選択状態にして、すぐ向き・大きさを調整できるようにする
+      selection = { kind: 'part', id: np.id };
+      updateToolbar();
       saveSoon();
       break;
     }
