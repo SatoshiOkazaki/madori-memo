@@ -892,11 +892,12 @@ function eraseAlong(a, b) {
 
 function eraseAt(x, y) {
   const r = ERASER_R;
+  const markHistory = () => { if (!drag.pushed) { pushHistory(); drag.pushed = true; } };
   const removeFrom = (arr, pred) => {
     let removed = false;
     for (let i = arr.length - 1; i >= 0; i--) {
       if (pred(arr[i])) {
-        if (!drag.pushed) { pushHistory(); drag.pushed = true; }
+        markHistory();
         if (selection && selection.id === arr[i].id) selection = null;
         arr.splice(i, 1);
         removed = true;
@@ -905,7 +906,7 @@ function eraseAt(x, y) {
     return removed;
   };
   if (drag.target === 'wall') {
-    removeFrom(state.walls, w => pointSeg(x, y, w.x1, w.y1, w.x2, w.y2).d <= r + WALL_W / 2);
+    eraseWallSpan(x, y, r, markHistory);
     removeFrom(state.parts, p => {
       const l = rotatePt(x - p.x, y - p.y, -p.angle);
       // ドアは弧のある側（flipVで上下反転）だけ広く判定
@@ -920,16 +921,69 @@ function eraseAt(x, y) {
     });
     removeFrom(state.furniture, f => rectBorderDist(x, y, f) <= r);
   } else {
-    removeFrom(state.strokes, s => {
-      const pts = s.points;
-      const tol = r + s.width / 2;
-      for (let i = 0; i + 3 < pts.length; i += 2) {
-        if (pointSeg(x, y, pts[i], pts[i + 1], pts[i + 2], pts[i + 3]).d <= tol) return true;
-      }
-      return pts.length >= 2 && dist(x, y, pts[0], pts[1]) <= tol;
-    });
+    eraseStrokeSpan(x, y, r, markHistory);
   }
   updateToolbar();
+}
+
+/* --- 部分消し: なぞった区間だけを取り除く（壁=線分カット、メモ=点列分割） --- */
+
+// 壁: 消しゴム円と壁線分の交差区間を取り除き、残り2辺を別の壁として残す
+function eraseWallSpan(x, y, r, markHistory) {
+  const MIN_PIECE = 10;   // これ未満の切れ端は破棄
+  for (let i = state.walls.length - 1; i >= 0; i--) {
+    const w = state.walls[i];
+    const L = dist(w.x1, w.y1, w.x2, w.y2);
+    if (!L) continue;
+    const ux = (w.x2 - w.x1) / L, uy = (w.y2 - w.y1) / L;
+    const rr = r + WALL_W / 2;   // 当たり幅は線種によらず一定（細線・点線も消しやすく）
+    if (pointSeg(x, y, w.x1, w.y1, w.x2, w.y2).d > rr) continue;
+    // 円中心を壁軸に射影し、円との交差区間 [a, b] を求める
+    const tc = (x - w.x1) * ux + (y - w.y1) * uy;
+    const dLine = Math.abs(-uy * (x - w.x1) + ux * (y - w.y1));
+    const h = Math.sqrt(Math.max(0, rr * rr - dLine * dLine));
+    const a = Math.max(0, tc - h), b = Math.min(L, tc + h);
+    if (b <= a) continue;
+    markHistory();
+    if (selection && selection.kind === 'wall' && selection.id === w.id) selection = null;
+    const mk = (s, e) => {
+      const nw = { id: nextId(), x1: w.x1 + ux * s, y1: w.y1 + uy * s, x2: w.x1 + ux * e, y2: w.y1 + uy * e };
+      if (w.style) nw.style = w.style;
+      return nw;
+    };
+    const pieces = [];
+    if (a >= MIN_PIECE) pieces.push(mk(0, a));
+    if (L - b >= MIN_PIECE) pieces.push(mk(b, L));
+    state.walls.splice(i, 1, ...pieces);
+  }
+}
+
+// メモ: 円内の点を取り除き、残った連続区間を別ストロークに分割
+function eraseStrokeSpan(x, y, r, markHistory) {
+  for (let i = state.strokes.length - 1; i >= 0; i--) {
+    const s = state.strokes[i];
+    const tol = r + s.width / 2;
+    const pts = s.points;
+    const runs = [];
+    let run = [];
+    let hit = false;
+    const flush = () => { if (run.length >= 4) runs.push(run); run = []; };
+    for (let j = 0; j + 1 < pts.length; j += 2) {
+      if (dist(x, y, pts[j], pts[j + 1]) <= tol) { hit = true; flush(); continue; }
+      // 点が疎な高速ストローク対策: 直前の点との線分が円をかすめる場合もそこで切る
+      if (run.length >= 2 &&
+          pointSeg(x, y, run[run.length - 2], run[run.length - 1], pts[j], pts[j + 1]).d <= tol) {
+        hit = true; flush();
+      }
+      run.push(pts[j], pts[j + 1]);
+    }
+    if (!hit) continue;
+    flush();
+    markHistory();
+    if (selection && selection.id === s.id) selection = null;
+    const mkStroke = pl => ({ id: nextId(), color: s.color, width: s.width, dash: s.dash, points: pl });
+    state.strokes.splice(i, 1, ...runs.map(mkStroke));
+  }
 }
 
 /* --- 選択中の操作 --- */
