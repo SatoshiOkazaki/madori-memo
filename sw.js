@@ -1,7 +1,7 @@
 /* 間取りメモ — Service Worker（アプリシェルを cache-first でキャッシュ） */
 'use strict';
 
-const CACHE_NAME = 'madori-memo-v1.0.0';   // 更新時はここのバージョンを上げる
+const CACHE_NAME = 'madori-memo-v1.1.0';   // 更新時はここのバージョンを上げる
 const ASSETS = [
   './',
   './index.html',

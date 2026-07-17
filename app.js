@@ -26,6 +26,11 @@ const ENDPOINT_SNAP = 20;     // 既存壁端点への吸着距離
 const PART_ATTACH = 40;       // パーツが壁に吸着する距離
 const ERASER_R = 12;          // 消しゴム半径（ワールド単位）
 const MIN_WALL_LEN = 20;      // これ未満の壁は破棄
+const MIN_PART_W = 30;        // パーツ幅の最小値
+const PART_W_STEP = 10;       // パーツ幅変更のスナップ刻み
+const MIN_FURN = 20;          // 家具枠の最小サイズ（幅・高さ）
+const FURN_LINE_W = 2;        // 家具枠の線幅（ワールド単位）
+const HANDLE_SIZE = 12;       // リサイズハンドルの一辺（ワールド単位）
 const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
 const HISTORY_MAX = 60;       // アンドゥ段数（>50）
 const STORE_KEY = 'madori-memo-v1';
@@ -35,23 +40,27 @@ const COLOR_ARC = '#6b7280';
 const COLOR_SELECT = '#2563eb';
 
 /* ===== 2. 状態（データモデル） =====
- * state.walls   : [{id, x1, y1, x2, y2}]                     … 壁（線分）
- * state.parts   : [{id, type:'door'|'slide'|'window',
- *                   x, y, angle(度), width}]                  … 建具パーツ（中心+角度）
- * state.strokes : [{id, color, width, points:[x0,y0,x1,y1..]}]… メモの手書き線
+ * state.walls    : [{id, x1, y1, x2, y2}]                     … 壁（線分）
+ * state.parts    : [{id, type:'door'|'slide'|'window',
+ *                    x, y, angle(度), width,
+ *                    flipH?, flipV?}]                          … 建具パーツ（中心+角度。
+ *                                                                flipはドア用: H=吊元左右, V=開き内外。未定義=false）
+ * state.strokes  : [{id, color, width, dash?, points:[...]}]  … メモの手書き線（dash未定義=実線）
+ * state.furniture: [{id, x, y, w, h, angle(度)}]              … 家具枠（中心+サイズ+角度）
  */
-let state = { walls: [], parts: [], strokes: [] };
+let state = { walls: [], parts: [], strokes: [], furniture: [] };
 let view = { x: 0, y: 0, scale: 1 };                 // 表示中ワールド左上と倍率
 let settings = { grid: true, memoVisible: true };
 let ui = {
   mode: 'wall',        // 'wall' | 'memo'
-  wallTool: 'wall',    // 'wall' | 'part' | 'select' | 'eraser'
+  wallTool: 'wall',    // 'wall' | 'part' | 'furniture' | 'select' | 'eraser'
   partType: 'door',    // 'door' | 'slide' | 'window'
   memoTool: 'pen',     // 'pen' | 'eraser'
   memoColor: '#111111',
   memoWidth: 3,
+  memoDash: false,     // 点線モード
 };
-let selection = null;  // {kind:'wall'|'part', id} | null
+let selection = null;  // {kind:'wall'|'part'|'furniture', id} | null
 let idSeq = 1;
 const nextId = () => idSeq++;
 
@@ -92,6 +101,25 @@ function rotatePt(x, y, deg) {
 
 function wallAngleDeg(w) {
   return Math.atan2(w.y2 - w.y1, w.x2 - w.x1) * 180 / Math.PI;
+}
+
+// 点(x,y)から回転矩形fの枠線までの最短距離（ローカル座標に変換して4辺との距離の最小を取る）
+function rectBorderDist(x, y, f) {
+  const l = rotatePt(x - f.x, y - f.y, -f.angle);
+  const hw = f.w / 2, hh = f.h / 2;
+  const segs = [
+    [-hw, -hh, hw, -hh], [hw, -hh, hw, hh],
+    [hw, hh, -hw, hh], [-hw, hh, -hw, -hh],
+  ];
+  let best = Infinity;
+  for (const [ax, ay, bx, by] of segs) best = Math.min(best, pointSeg(l.x, l.y, ax, ay, bx, by).d);
+  return best;
+}
+
+// 点(x,y)が回転矩形fの内部にあるか
+function pointInRect(x, y, f) {
+  const l = rotatePt(x - f.x, y - f.y, -f.angle);
+  return Math.abs(l.x) <= f.w / 2 && Math.abs(l.y) <= f.h / 2;
 }
 
 /* ===== 5. スナップ処理 =====
@@ -201,11 +229,12 @@ function loadStored() {
     if (!raw) return;
     const data = JSON.parse(raw);
     if (data.state) state = data.state;
+    if (!state.furniture) state.furniture = [];   // 旧データ（v1.0）互換
     if (data.view) view = data.view;
     if (data.settings) settings = Object.assign(settings, data.settings);
     // idの継続性を確保
     let maxId = 0;
-    for (const arr of [state.walls, state.parts, state.strokes])
+    for (const arr of [state.walls, state.parts, state.strokes, state.furniture])
       for (const o of arr) maxId = Math.max(maxId, o.id || 0);
     idSeq = maxId + 1;
   } catch (e) { /* 壊れたデータは無視して初期状態 */ }
@@ -236,6 +265,7 @@ function render() {
     memoVisible: settings.memoVisible,
     selection,
   });
+  drawHandles(ctx, view);
   drawOverlay(ctx, view);
 }
 
@@ -267,6 +297,10 @@ function drawScene(c, tf, opts) {
     drawWallLine(c, tf, w, COLOR_WALL, WALL_W);
     if (isSel) drawWallLine(c, tf, w, 'rgba(37,99,235,0.45)', WALL_W + 8);
   }
+  // 家具（細線枠。壁の上に重ねる）
+  for (const f of state.furniture) {
+    drawFurniture(c, tf, f, sel && sel.kind === 'furniture' && sel.id === f.id);
+  }
   // パーツ（壁の開口を白で抜くので壁の後）
   for (const p of state.parts) {
     drawPart(c, tf, p, sel && sel.kind === 'part' && sel.id === p.id);
@@ -292,6 +326,7 @@ function drawStroke(c, tf, s) {
   c.lineWidth = Math.max(0.75, s.width * tf.scale);
   c.lineCap = 'round';
   c.lineJoin = 'round';
+  if (s.dash) c.setLineDash([8 * tf.scale, 6 * tf.scale]);  // dash未定義=実線（旧データ互換）
   c.beginPath();
   const p0 = w2s(tf, pts[0], pts[1]);
   c.moveTo(p0.x, p0.y);
@@ -300,6 +335,7 @@ function drawStroke(c, tf, s) {
     c.lineTo(p.x, p.y);
   }
   c.stroke();
+  c.setLineDash([]);
 }
 
 function drawPart(c, tf, p, selected) {
@@ -309,6 +345,8 @@ function drawPart(c, tf, p, selected) {
   c.translate(s.x, s.y);
   c.rotate(p.angle * Math.PI / 180);
   c.scale(tf.scale, tf.scale);   // 以降ワールド単位で描ける
+  // ドアの反転（flipH=吊元左右, flipV=開き内外）。ローカル座標をミラーする
+  if (p.flipH || p.flipV) c.scale(p.flipH ? -1 : 1, p.flipV ? -1 : 1);
   c.lineCap = 'butt';
 
   // 壁の開口部を白抜き
@@ -356,6 +394,60 @@ function drawPart(c, tf, p, selected) {
   c.restore();
 }
 
+function drawFurniture(c, tf, f, selected) {
+  const s = w2s(tf, f.x, f.y);
+  c.save();
+  c.translate(s.x, s.y);
+  c.rotate(f.angle * Math.PI / 180);
+  c.scale(tf.scale, tf.scale);   // 以降ワールド単位で描ける
+  c.strokeStyle = COLOR_WALL;
+  c.lineWidth = FURN_LINE_W;
+  c.strokeRect(-f.w / 2, -f.h / 2, f.w, f.h);
+  if (selected) {
+    c.strokeStyle = 'rgba(37,99,235,0.45)';
+    c.lineWidth = FURN_LINE_W + 6;
+    c.strokeRect(-f.w / 2, -f.h / 2, f.w, f.h);
+  }
+  c.restore();
+}
+
+/* --- リサイズハンドル（選択中のパーツ両端 / 家具四隅。メイン描画のみ、書き出しには含めない） --- */
+function handlePositions() {
+  if (!selection) return [];
+  if (selection.kind === 'part') {
+    const p = state.parts.find(o => o.id === selection.id);
+    if (!p) return [];
+    // 両端（ローカル ±width/2, 0）。sgn=掴んだ側のローカルx符号
+    return [-1, 1].map(sgn => {
+      const r = rotatePt(sgn * p.width / 2, 0, p.angle);
+      return { kind: 'part', obj: p, sgn, x: p.x + r.x, y: p.y + r.y };
+    });
+  }
+  if (selection.kind === 'furniture') {
+    const f = state.furniture.find(o => o.id === selection.id);
+    if (!f) return [];
+    const out = [];
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+      const r = rotatePt(sx * f.w / 2, sy * f.h / 2, f.angle);
+      out.push({ kind: 'furniture', obj: f, sx, sy, x: f.x + r.x, y: f.y + r.y });
+    }
+    return out;
+  }
+  return [];
+}
+
+function drawHandles(c, tf) {
+  for (const h of handlePositions()) {
+    const s = w2s(tf, h.x, h.y);
+    const r = HANDLE_SIZE * tf.scale / 2;
+    c.fillStyle = COLOR_SELECT;
+    c.fillRect(s.x - r, s.y - r, r * 2, r * 2);
+    c.strokeStyle = '#ffffff';
+    c.lineWidth = 1.5;
+    c.strokeRect(s.x - r, s.y - r, r * 2, r * 2);
+  }
+}
+
 // 操作中のプレビュー（描きかけの壁・ストローク・消しゴムカーソル・配置プレビュー）
 function drawOverlay(c, tf) {
   if (!drag) return;
@@ -363,7 +455,14 @@ function drawOverlay(c, tf) {
     drawWallLine(c, tf, drag.preview, 'rgba(55,65,81,0.55)', WALL_W);
   }
   if (drag.type === 'stroke' && drag.points.length >= 4) {
-    drawStroke(c, tf, { color: ui.memoColor, width: ui.memoWidth, points: drag.points });
+    drawStroke(c, tf, { color: ui.memoColor, width: ui.memoWidth, dash: ui.memoDash, points: drag.points });
+  }
+  if (drag.type === 'placeFurniture') {
+    const cx = (drag.sx + drag.ex) / 2, cy = (drag.sy + drag.ey) / 2;
+    const fw = Math.abs(drag.ex - drag.sx), fh = Math.abs(drag.ey - drag.sy);
+    c.globalAlpha = 0.6;
+    drawFurniture(c, tf, { x: cx, y: cy, w: fw, h: fh, angle: 0 }, false);
+    c.globalAlpha = 1;
   }
   if (drag.type === 'placePart' && drag.pos) {
     c.globalAlpha = 0.6;
@@ -497,6 +596,10 @@ function startTool(pointerId, p, w) {
         drag = { type: 'placePart', pointerId, pos };
         break;
       }
+      case 'furniture':
+        // 対角ドラッグで家具枠を作成（グリッドスナップなしの自由配置）
+        drag = { type: 'placeFurniture', pointerId, sx: w.x, sy: w.y, ex: w.x, ey: w.y };
+        break;
       case 'select':
         startSelect(pointerId, w);
         break;
@@ -520,10 +623,34 @@ function startTool(pointerId, p, w) {
 }
 
 function startSelect(pointerId, w) {
+  // (0) 選択中要素のリサイズハンドル（移動判定より優先）
+  const h = hitHandle(w.x, w.y);
+  if (h) {
+    if (h.kind === 'part') {
+      // 反対側の端をワールド座標で固定
+      const f = rotatePt(-h.sgn * h.obj.width / 2, 0, h.obj.angle);
+      drag = { type: 'resizePart', pointerId, part: h.obj, sgn: h.sgn,
+               fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+    } else {
+      // 対角の隅をワールド座標で固定
+      const f = rotatePt(-h.sx * h.obj.w / 2, -h.sy * h.obj.h / 2, h.obj.angle);
+      drag = { type: 'resizeFurniture', pointerId, furn: h.obj, sx: h.sx, sy: h.sy,
+               fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+    }
+    return;
+  }
+  // ヒット優先順: パーツ > 家具(枠線近傍) > 壁 > 家具(内部)
   const part = hitPart(w.x, w.y);
   if (part) {
     selection = { kind: 'part', id: part.id };
     drag = { type: 'movePart', pointerId, part, offX: w.x - part.x, offY: w.y - part.y, started: false };
+    updateToolbar();
+    return;
+  }
+  const furnEdge = hitFurniture(w.x, w.y, true);
+  if (furnEdge) {
+    selection = { kind: 'furniture', id: furnEdge.id };
+    drag = { type: 'moveFurniture', pointerId, furn: furnEdge, offX: w.x - furnEdge.x, offY: w.y - furnEdge.y, started: false };
     updateToolbar();
     return;
   }
@@ -536,6 +663,13 @@ function startSelect(pointerId, w) {
       orig: { x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 },
       started: false,
     };
+    updateToolbar();
+    return;
+  }
+  const furnIn = hitFurniture(w.x, w.y, false);
+  if (furnIn) {
+    selection = { kind: 'furniture', id: furnIn.id };
+    drag = { type: 'moveFurniture', pointerId, furn: furnIn, offX: w.x - furnIn.x, offY: w.y - furnIn.y, started: false };
     updateToolbar();
     return;
   }
@@ -567,6 +701,40 @@ function moveTool(p, w) {
       const dy = snapToGrid(drag.orig.y1 + rawDy) - drag.orig.y1;
       drag.wall.x1 = drag.orig.x1 + dx; drag.wall.y1 = drag.orig.y1 + dy;
       drag.wall.x2 = drag.orig.x2 + dx; drag.wall.y2 = drag.orig.y2 + dy;
+      break;
+    }
+    case 'placeFurniture':
+      drag.ex = w.x; drag.ey = w.y;
+      break;
+    case 'moveFurniture': {
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      // グリッドに縛られず自由に移動
+      drag.furn.x = w.x - drag.offX;
+      drag.furn.y = w.y - drag.offY;
+      break;
+    }
+    case 'resizePart': {
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      const pt = drag.part;
+      // 固定端→ポインタをパーツ軸に射影し、10刻み・最小30で幅を決める
+      const u = rotatePt(1, 0, pt.angle);
+      let nw = ((w.x - drag.fx) * u.x + (w.y - drag.fy) * u.y) * drag.sgn;
+      nw = Math.max(MIN_PART_W, Math.round(nw / PART_W_STEP) * PART_W_STEP);
+      pt.width = nw;
+      pt.x = drag.fx + drag.sgn * u.x * nw / 2;
+      pt.y = drag.fy + drag.sgn * u.y * nw / 2;
+      break;
+    }
+    case 'resizeFurniture': {
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      const f = drag.furn;
+      // 固定隅からのローカル差分で新サイズを決める（最小20、スナップなし）
+      const l = rotatePt(w.x - drag.fx, w.y - drag.fy, -f.angle);
+      const nw = Math.max(MIN_FURN, l.x * drag.sx);
+      const nh = Math.max(MIN_FURN, l.y * drag.sy);
+      const ctr = rotatePt(drag.sx * nw / 2, drag.sy * nh / 2, f.angle);
+      f.w = nw; f.h = nh;
+      f.x = drag.fx + ctr.x; f.y = drag.fy + ctr.y;
       break;
     }
     case 'erase':
@@ -601,14 +769,28 @@ function endTool(p, w) {
       saveSoon();
       break;
     }
+    case 'placeFurniture': {
+      const x1 = Math.min(drag.sx, drag.ex), x2 = Math.max(drag.sx, drag.ex);
+      const y1 = Math.min(drag.sy, drag.ey), y2 = Math.max(drag.sy, drag.ey);
+      const fw = x2 - x1, fh = y2 - y1;
+      if (fw >= MIN_FURN && fh >= MIN_FURN) {
+        pushHistory();
+        state.furniture.push({ id: nextId(), x: (x1 + x2) / 2, y: (y1 + y2) / 2, w: fw, h: fh, angle: 0 });
+        saveSoon();
+      }
+      break;
+    }
     case 'movePart':
     case 'moveWall':
+    case 'moveFurniture':
+    case 'resizePart':
+    case 'resizeFurniture':
       if (drag.started) saveSoon();
       break;
     case 'stroke':
       if (drag.points.length >= 4) {
         pushHistory();
-        state.strokes.push({ id: nextId(), color: ui.memoColor, width: ui.memoWidth, points: drag.points });
+        state.strokes.push({ id: nextId(), color: ui.memoColor, width: ui.memoWidth, dash: ui.memoDash, points: drag.points });
         saveSoon();
       }
       break;
@@ -632,8 +814,36 @@ function hitPart(x, y) {
   for (let i = state.parts.length - 1; i >= 0; i--) {
     const p = state.parts[i];
     const l = rotatePt(x - p.x, y - p.y, -p.angle);
-    const top = (p.type === 'door') ? -p.width - 10 : -14;
-    if (Math.abs(l.x) <= p.width / 2 + 12 && l.y >= top && l.y <= 14) return p;
+    // ドアは弧のある側だけ大きく張り出す。flipVで弧が上下反転するので判定域も反転させる
+    let top, bottom;
+    if (p.type === 'door') {
+      if (p.flipV) { top = -14; bottom = p.width + 10; }
+      else { top = -p.width - 10; bottom = 14; }
+    } else {
+      top = -14; bottom = 14;
+    }
+    if (Math.abs(l.x) <= p.width / 2 + 12 && l.y >= top && l.y <= bottom) return p;
+  }
+  return null;
+}
+
+// 家具のヒット判定: edgeOnly=trueは枠線近傍のみ、falseは内部タップも許容
+// （枠線近傍は壁より優先、内部は壁に当たらなかったときのフォールバックとして使う）
+function hitFurniture(x, y, edgeOnly) {
+  const tol = Math.max(10, 12 / view.scale);
+  for (let i = state.furniture.length - 1; i >= 0; i--) {
+    const f = state.furniture[i];
+    if (rectBorderDist(x, y, f) <= tol) return f;
+    if (!edgeOnly && pointInRect(x, y, f)) return f;
+  }
+  return null;
+}
+
+// リサイズハンドルの当たり判定（選択中要素のみ。移動判定より優先して呼ぶ）
+function hitHandle(x, y) {
+  const tol = Math.max(HANDLE_SIZE, 14 / view.scale);
+  for (const h of handlePositions()) {
+    if (dist(x, y, h.x, h.y) <= tol) return h;
   }
   return null;
 }
@@ -666,9 +876,17 @@ function eraseAt(x, y) {
     removeFrom(state.walls, w => pointSeg(x, y, w.x1, w.y1, w.x2, w.y2).d <= r + WALL_W / 2);
     removeFrom(state.parts, p => {
       const l = rotatePt(x - p.x, y - p.y, -p.angle);
-      const top = (p.type === 'door') ? -p.width - r : -WALL_W - r;
-      return Math.abs(l.x) <= p.width / 2 + r && l.y >= top && l.y <= WALL_W + r;
+      // ドアは弧のある側（flipVで上下反転）だけ広く判定
+      let top, bottom;
+      if (p.type === 'door') {
+        if (p.flipV) { top = -WALL_W - r; bottom = p.width + r; }
+        else { top = -p.width - r; bottom = WALL_W + r; }
+      } else {
+        top = -WALL_W - r; bottom = WALL_W + r;
+      }
+      return Math.abs(l.x) <= p.width / 2 + r && l.y >= top && l.y <= bottom;
     });
+    removeFrom(state.furniture, f => rectBorderDist(x, y, f) <= r);
   } else {
     removeFrom(state.strokes, s => {
       const pts = s.points;
@@ -689,6 +907,9 @@ function rotateSelection() {
   if (selection.kind === 'part') {
     const p = state.parts.find(o => o.id === selection.id);
     if (p) p.angle = (p.angle + 90) % 360;
+  } else if (selection.kind === 'furniture') {
+    const f = state.furniture.find(o => o.id === selection.id);
+    if (f) f.angle = (f.angle + 90) % 360;
   } else {
     const w = state.walls.find(o => o.id === selection.id);
     if (w) {
@@ -707,15 +928,26 @@ function deleteSelection() {
   if (!selection) return;
   pushHistory();
   if (selection.kind === 'part') state.parts = state.parts.filter(o => o.id !== selection.id);
+  else if (selection.kind === 'furniture') state.furniture = state.furniture.filter(o => o.id !== selection.id);
   else state.walls = state.walls.filter(o => o.id !== selection.id);
   selection = null;
+  afterMutation();
+}
+
+// ドアの反転（prop: 'flipH'=吊元左右, 'flipV'=開き内外）。選択中のドアのみ有効
+function flipSelection(prop) {
+  if (!selection || selection.kind !== 'part') return;
+  const p = state.parts.find(o => o.id === selection.id);
+  if (!p || p.type !== 'door') return;
+  pushHistory();
+  p[prop] = !p[prop];
   afterMutation();
 }
 
 function clearAll() {
   if (!confirm('すべての壁・パーツ・メモを削除します。よろしいですか？')) return;
   pushHistory();
-  state = { walls: [], parts: [], strokes: [] };
+  state = { walls: [], parts: [], strokes: [], furniture: [] };
   selection = null;
   afterMutation();
 }
@@ -737,6 +969,7 @@ function computeBBox() {
   };
   for (const w of state.walls) { add(w.x1, w.y1, WALL_W); add(w.x2, w.y2, WALL_W); }
   for (const p of state.parts) add(p.x, p.y, p.width + 10);
+  for (const f of state.furniture) add(f.x, f.y, Math.hypot(f.w, f.h) / 2 + FURN_LINE_W);  // 回転対応の外接円
   if (settings.memoVisible) {
     for (const s of state.strokes)
       for (let i = 0; i + 1 < s.points.length; i += 2) add(s.points[i], s.points[i + 1], s.width);
@@ -791,6 +1024,7 @@ const partBtns = [...document.querySelectorAll('[data-part]')];
 const memoToolBtns = [...document.querySelectorAll('[data-memotool]')];
 const colorBtns = [...document.querySelectorAll('[data-color]')];
 const widthBtns = [...document.querySelectorAll('[data-penwidth]')];
+const dashBtns = [...document.querySelectorAll('[data-dash]')];
 
 function updateToolbar() {
   const wallMode = ui.mode === 'wall';
@@ -810,10 +1044,19 @@ function updateToolbar() {
     b.classList.toggle('active', ui.memoColor === b.dataset.color);
   for (const b of widthBtns)
     b.classList.toggle('active', ui.memoWidth === Number(b.dataset.penwidth));
+  for (const b of dashBtns)
+    b.classList.toggle('active', ui.memoDash === (b.dataset.dash === '1'));
+
+  // 選択中パーツがドアのときのみ吊元/開き反転ボタンを有効化
+  const selPart = selection && selection.kind === 'part'
+    ? state.parts.find(o => o.id === selection.id) : null;
+  const isDoor = !!selPart && selPart.type === 'door';
 
   $('btnUndo').disabled = undoStack.length === 0;
   $('btnRedo').disabled = redoStack.length === 0;
   $('btnRotate').disabled = !selection;
+  $('btnFlipH').disabled = !isDoor;
+  $('btnFlipV').disabled = !isDoor;
   $('btnDelete').disabled = !selection;
   $('btnGrid').classList.toggle('active', settings.grid);
   $('btnMemoVis').classList.toggle('active', settings.memoVisible);
@@ -833,10 +1076,14 @@ function bindUI() {
     b.addEventListener('click', () => { ui.memoColor = b.dataset.color; ui.memoTool = 'pen'; updateToolbar(); });
   for (const b of widthBtns)
     b.addEventListener('click', () => { ui.memoWidth = Number(b.dataset.penwidth); ui.memoTool = 'pen'; updateToolbar(); });
+  for (const b of dashBtns)
+    b.addEventListener('click', () => { ui.memoDash = b.dataset.dash === '1'; ui.memoTool = 'pen'; updateToolbar(); });
 
   $('btnUndo').addEventListener('click', undo);
   $('btnRedo').addEventListener('click', redo);
   $('btnRotate').addEventListener('click', rotateSelection);
+  $('btnFlipH').addEventListener('click', () => flipSelection('flipH'));
+  $('btnFlipV').addEventListener('click', () => flipSelection('flipV'));
   $('btnDelete').addEventListener('click', deleteSelection);
   $('btnGrid').addEventListener('click', () => { settings.grid = !settings.grid; updateToolbar(); requestRender(); saveSoon(); });
   $('btnMemoVis').addEventListener('click', () => { settings.memoVisible = !settings.memoVisible; updateToolbar(); requestRender(); saveSoon(); });
