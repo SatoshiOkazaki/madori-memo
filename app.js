@@ -189,6 +189,41 @@ function snapWallStroke(x1, y1, x2, y2) {
   return { x1: sp.x, y1: sp.y, x2: ex, y2: ey };
 }
 
+// パーツを最寄りの壁の線上に固定配置する（壁が無ければnull）
+// 位置=ペンの壁沿い成分（パーツが壁からはみ出さないようクランプ）
+// perp=壁の直線からの垂直距離（ドアの向き切替の入力に使う）
+function attachPartToWall(px, py, width) {
+  let bw = null, bd = Infinity;
+  for (const w of state.walls) {
+    const d = pointSeg(px, py, w.x1, w.y1, w.x2, w.y2).d;
+    if (d < bd) { bd = d; bw = w; }
+  }
+  if (!bw) return null;
+  const L = dist(bw.x1, bw.y1, bw.x2, bw.y2);
+  if (!L) return null;
+  const ux = (bw.x2 - bw.x1) / L, uy = (bw.y2 - bw.y1) / L;
+  let t = (px - bw.x1) * ux + (py - bw.y1) * uy;
+  const half = Math.min(width / 2, L / 2);
+  t = Math.max(half, Math.min(L - half, t));
+  return {
+    x: bw.x1 + ux * t,
+    y: bw.y1 + uy * t,
+    angle: wallAngleDeg(bw),
+    perp: Math.abs(-uy * (px - bw.x1) + ux * (py - bw.y1)),
+  };
+}
+
+// ドアの向きサイクル: 壁からの垂直距離が遊び(25)を超えると、45単位ごとに
+// 吊元→開き→吊元→開き… の順で反転が進む（4パターンを一巡して繰り返し）
+const FLIP_DEAD = 25, FLIP_BAND = 45;
+function cycleFlips(baseH, baseV, perp) {
+  const k = perp <= FLIP_DEAD ? 0 : (Math.floor((perp - FLIP_DEAD) / FLIP_BAND) + 1) % 4;
+  return {
+    flipH: (k === 1 || k === 2) ? !baseH : !!baseH,
+    flipV: (k === 2 || k === 3) ? !baseV : !!baseV,
+  };
+}
+
 // パーツの吸着: 最も近い壁(40単位以内)に位置と角度を合わせる。なければ角度のみ0/90スナップ
 function snapPart(x, y, angle) {
   let best = null, bd = PART_ATTACH;
@@ -642,8 +677,9 @@ function startTool(pointerId, p, w) {
           updateToolbar();
           break;
         }
-        const pos = snapPart(w.x, w.y, 0);
-        // ドアは置いた位置に固定し、ドラッグ方向で吊元・開きを決める
+        // 最寄りの壁に固定配置（壁が無いときのみ従来の自由配置）
+        const att = attachPartToWall(w.x, w.y, PART_W);
+        const pos = att ? { x: att.x, y: att.y, angle: att.angle } : snapPart(w.x, w.y, 0);
         drag = { type: 'placePart', pointerId, pos, flipH: false, flipV: false };
         break;
       }
@@ -751,22 +787,38 @@ function moveTool(p, w) {
     case 'wall':
       drag.preview = snapWallStroke(drag.sx, drag.sy, w.x, w.y);
       break;
-    case 'placePart':
-      if (ui.partType === 'door') {
-        // 設置位置は固定のまま、ペン位置のローカル座標で吊元(左右)・開き(内外)を決める
-        // → ドラッグした方向にドアの開き先が向く。10単位以内の揺れでは反転しない
-        const a = drag.pos;
-        const l = rotatePt(w.x - a.x, w.y - a.y, -a.angle);
-        if (Math.abs(l.x) > 10) drag.flipH = l.x > 0;
-        if (Math.abs(l.y) > 10) drag.flipV = l.y > 0;
+    case 'placePart': {
+      // 壁沿い成分=位置、垂直成分=ドアの向きサイクル（壁からは離れない）
+      const att = attachPartToWall(w.x, w.y, PART_W);
+      if (att) {
+        drag.pos = { x: att.x, y: att.y, angle: att.angle };
+        if (ui.partType === 'door') {
+          const f = cycleFlips(false, false, att.perp);
+          drag.flipH = f.flipH; drag.flipV = f.flipV;
+        }
       } else {
         drag.pos = snapPart(w.x, w.y, 0);
       }
       break;
+    }
     case 'movePart': {
-      if (!drag.started) { pushHistory(); drag.started = true; }
-      const s = snapPart(w.x - drag.offX, w.y - drag.offY, drag.part.angle);
-      drag.part.x = s.x; drag.part.y = s.y; drag.part.angle = s.angle;
+      if (!drag.started) {
+        pushHistory(); drag.started = true;
+        // 向きサイクルの基準は掴んだ時点の向き
+        drag.baseH = !!drag.part.flipH; drag.baseV = !!drag.part.flipV;
+      }
+      const px = w.x - drag.offX, py = w.y - drag.offY;
+      const att = attachPartToWall(px, py, drag.part.width);
+      if (att) {
+        drag.part.x = att.x; drag.part.y = att.y; drag.part.angle = att.angle;
+        if (drag.part.type === 'door') {
+          const f = cycleFlips(drag.baseH, drag.baseV, att.perp);
+          drag.part.flipH = f.flipH; drag.part.flipV = f.flipV;
+        }
+      } else {
+        const s = snapPart(px, py, drag.part.angle);
+        drag.part.x = s.x; drag.part.y = s.y; drag.part.angle = s.angle;
+      }
       break;
     }
     case 'moveWall': {
@@ -841,8 +893,8 @@ function endTool(p, w) {
       break;
     }
     case 'placePart': {
-      // ドアはドラッグで向きを決めるため位置は掴んだ時点のまま。他パーツは離した位置
-      const pos = (ui.partType === 'door') ? drag.pos : snapPart(w.x, w.y, 0);
+      // 位置・向きはドラッグ中に更新済みのものをそのまま確定
+      const pos = drag.pos;
       pushHistory();
       const np = { id: nextId(), type: ui.partType, x: pos.x, y: pos.y, angle: pos.angle, width: PART_W };
       if (ui.partType === 'door') {
