@@ -500,7 +500,8 @@ function drawOverlay(c, tf) {
   }
   if (drag.type === 'placePart' && drag.pos) {
     c.globalAlpha = 0.6;
-    drawPart(c, tf, { type: ui.partType, x: drag.pos.x, y: drag.pos.y, angle: drag.pos.angle, width: PART_W }, false);
+    drawPart(c, tf, { type: ui.partType, x: drag.pos.x, y: drag.pos.y, angle: drag.pos.angle,
+                      width: PART_W, flipH: drag.flipH, flipV: drag.flipV }, false);
     c.globalAlpha = 1;
   }
   if (drag.type === 'erase' && drag.cursor) {
@@ -642,7 +643,8 @@ function startTool(pointerId, p, w) {
           break;
         }
         const pos = snapPart(w.x, w.y, 0);
-        drag = { type: 'placePart', pointerId, pos };
+        // ドアは置いた位置に固定し、ドラッグ方向で吊元・開きを決める
+        drag = { type: 'placePart', pointerId, pos, flipH: false, flipV: false };
         break;
       }
       case 'furniture': {
@@ -750,7 +752,16 @@ function moveTool(p, w) {
       drag.preview = snapWallStroke(drag.sx, drag.sy, w.x, w.y);
       break;
     case 'placePart':
-      drag.pos = snapPart(w.x, w.y, 0);
+      if (ui.partType === 'door') {
+        // 設置位置は固定のまま、ペン位置のローカル座標で吊元(左右)・開き(内外)を決める
+        // → ドラッグした方向にドアの開き先が向く。10単位以内の揺れでは反転しない
+        const a = drag.pos;
+        const l = rotatePt(w.x - a.x, w.y - a.y, -a.angle);
+        if (Math.abs(l.x) > 10) drag.flipH = l.x > 0;
+        if (Math.abs(l.y) > 10) drag.flipV = l.y > 0;
+      } else {
+        drag.pos = snapPart(w.x, w.y, 0);
+      }
       break;
     case 'movePart': {
       if (!drag.started) { pushHistory(); drag.started = true; }
@@ -830,9 +841,14 @@ function endTool(p, w) {
       break;
     }
     case 'placePart': {
-      const pos = snapPart(w.x, w.y, 0);
+      // ドアはドラッグで向きを決めるため位置は掴んだ時点のまま。他パーツは離した位置
+      const pos = (ui.partType === 'door') ? drag.pos : snapPart(w.x, w.y, 0);
       pushHistory();
       const np = { id: nextId(), type: ui.partType, x: pos.x, y: pos.y, angle: pos.angle, width: PART_W };
+      if (ui.partType === 'door') {
+        if (drag.flipH) np.flipH = true;
+        if (drag.flipV) np.flipV = true;
+      }
       state.parts.push(np);
       // 配置直後に選択状態にして、すぐ向き・大きさを調整できるようにする
       selection = { kind: 'part', id: np.id };
