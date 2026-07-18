@@ -46,7 +46,7 @@ const COLOR_SELECT = '#2563eb';
  *                    flipH?, flipV?}]                          … 建具パーツ（中心+角度。
  *                                                                flipはドア用: H=吊元左右, V=開き内外。未定義=false）
  * state.strokes  : [{id, color, width, dash?, points:[...]}]  … メモの手書き線（dash未定義=実線）
- * state.furniture: [{id, x, y, w, h, angle(度)}]              … 家具枠（中心+サイズ+角度）
+ * state.furniture: [{id, x, y, w, h, angle(度), shape?}]      … 家具枠（中心+サイズ+角度。shape:'ellipse'=楕円、未定義=四角）
  */
 let state = { walls: [], parts: [], strokes: [], furniture: [] };
 let view = { x: 0, y: 0, scale: 1 };                 // 表示中ワールド左上と倍率
@@ -60,6 +60,7 @@ let ui = {
   memoColor: '#111111',
   memoWidth: 3,
   memoDash: false,     // 点線モード
+  furnShape: 'rect',   // 家具の形状: 'rect' | 'ellipse'
 };
 let selection = null;  // {kind:'wall'|'part'|'furniture', id} | null
 let idSeq = 1;
@@ -121,6 +122,22 @@ function rectBorderDist(x, y, f) {
 function pointInRect(x, y, f) {
   const l = rotatePt(x - f.x, y - f.y, -f.angle);
   return Math.abs(l.x) <= f.w / 2 && Math.abs(l.y) <= f.h / 2;
+}
+
+// 家具の形状（四角/楕円）を考慮した枠線距離・内部判定
+function furnBorderDist(x, y, f) {
+  if (f.shape !== 'ellipse') return rectBorderDist(x, y, f);
+  const l = rotatePt(x - f.x, y - f.y, -f.angle);
+  const a = f.w / 2, b = f.h / 2;
+  const n = Math.hypot(l.x / a, l.y / b);
+  if (!n) return Math.min(a, b);
+  // 楕円周への radial 射影による近似距離（ヒット判定用途には十分）
+  return dist(l.x, l.y, l.x / n, l.y / n);
+}
+function furnInside(x, y, f) {
+  if (f.shape !== 'ellipse') return pointInRect(x, y, f);
+  const l = rotatePt(x - f.x, y - f.y, -f.angle);
+  return (l.x / (f.w / 2)) ** 2 + (l.y / (f.h / 2)) ** 2 <= 1;
 }
 
 /* ===== 5. スナップ処理 =====
@@ -410,13 +427,19 @@ function drawFurniture(c, tf, f, selected) {
   c.translate(s.x, s.y);
   c.rotate(f.angle * Math.PI / 180);
   c.scale(tf.scale, tf.scale);   // 以降ワールド単位で描ける
+  const outline = () => {
+    c.beginPath();
+    if (f.shape === 'ellipse') c.ellipse(0, 0, f.w / 2, f.h / 2, 0, 0, Math.PI * 2);
+    else c.rect(-f.w / 2, -f.h / 2, f.w, f.h);
+    c.stroke();
+  };
   c.strokeStyle = COLOR_WALL;
   c.lineWidth = FURN_LINE_W;
-  c.strokeRect(-f.w / 2, -f.h / 2, f.w, f.h);
+  outline();
   if (selected) {
     c.strokeStyle = 'rgba(37,99,235,0.45)';
     c.lineWidth = FURN_LINE_W + 6;
-    c.strokeRect(-f.w / 2, -f.h / 2, f.w, f.h);
+    outline();
   }
   c.restore();
 }
@@ -472,7 +495,7 @@ function drawOverlay(c, tf) {
     const cx = (drag.sx + drag.ex) / 2, cy = (drag.sy + drag.ey) / 2;
     const fw = Math.abs(drag.ex - drag.sx), fh = Math.abs(drag.ey - drag.sy);
     c.globalAlpha = 0.6;
-    drawFurniture(c, tf, { x: cx, y: cy, w: fw, h: fh, angle: 0 }, false);
+    drawFurniture(c, tf, { x: cx, y: cy, w: fw, h: fh, angle: 0, shape: ui.furnShape === 'ellipse' ? 'ellipse' : undefined }, false);
     c.globalAlpha = 1;
   }
   if (drag.type === 'placePart' && drag.pos) {
@@ -622,10 +645,26 @@ function startTool(pointerId, p, w) {
         drag = { type: 'placePart', pointerId, pos };
         break;
       }
-      case 'furniture':
+      case 'furniture': {
+        // 家具/円ツールのまま既存の枠を調整できる（ハンドル > 既存家具 > 新規作成）
+        const h = hitHandle(w.x, w.y);
+        if (h && h.kind === 'furniture') {
+          const f = rotatePt(-h.sx * h.obj.w / 2, -h.sy * h.obj.h / 2, h.obj.angle);
+          drag = { type: 'resizeFurniture', pointerId, furn: h.obj, sx: h.sx, sy: h.sy,
+                   fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+          break;
+        }
+        const furn = hitFurniture(w.x, w.y, false);
+        if (furn) {
+          selection = { kind: 'furniture', id: furn.id };
+          drag = { type: 'moveFurniture', pointerId, furn, offX: w.x - furn.x, offY: w.y - furn.y, started: false };
+          updateToolbar();
+          break;
+        }
         // 対角ドラッグで家具枠を作成（グリッドスナップなしの自由配置）
         drag = { type: 'placeFurniture', pointerId, sx: w.x, sy: w.y, ex: w.x, ey: w.y };
         break;
+      }
       case 'select':
         startSelect(pointerId, w);
         break;
@@ -807,7 +846,12 @@ function endTool(p, w) {
       const fw = x2 - x1, fh = y2 - y1;
       if (fw >= MIN_FURN && fh >= MIN_FURN) {
         pushHistory();
-        state.furniture.push({ id: nextId(), x: (x1 + x2) / 2, y: (y1 + y2) / 2, w: fw, h: fh, angle: 0 });
+        const nf = { id: nextId(), x: (x1 + x2) / 2, y: (y1 + y2) / 2, w: fw, h: fh, angle: 0 };
+        if (ui.furnShape === 'ellipse') nf.shape = 'ellipse';
+        state.furniture.push(nf);
+        // 設置直後に選択状態にして、すぐ移動・サイズ調整できるようにする
+        selection = { kind: 'furniture', id: nf.id };
+        updateToolbar();
         saveSoon();
       }
       break;
@@ -865,8 +909,8 @@ function hitFurniture(x, y, edgeOnly) {
   const tol = Math.max(10, 12 / view.scale);
   for (let i = state.furniture.length - 1; i >= 0; i--) {
     const f = state.furniture[i];
-    if (rectBorderDist(x, y, f) <= tol) return f;
-    if (!edgeOnly && pointInRect(x, y, f)) return f;
+    if (furnBorderDist(x, y, f) <= tol) return f;
+    if (!edgeOnly && furnInside(x, y, f)) return f;
   }
   return null;
 }
@@ -919,7 +963,7 @@ function eraseAt(x, y) {
       }
       return Math.abs(l.x) <= p.width / 2 + r && l.y >= top && l.y <= bottom;
     });
-    removeFrom(state.furniture, f => rectBorderDist(x, y, f) <= r);
+    removeFrom(state.furniture, f => furnBorderDist(x, y, f) <= r);
   } else {
     eraseStrokeSpan(x, y, r, markHistory);
   }
@@ -1136,7 +1180,8 @@ function updateToolbar() {
     b.classList.toggle('active', ui.wallStyle === b.dataset.wallstyle);
 
   for (const b of wallToolBtns)
-    b.classList.toggle('active', wallMode && ui.wallTool === b.dataset.walltool);
+    b.classList.toggle('active', wallMode && ui.wallTool === b.dataset.walltool
+      && (!b.dataset.furnshape || ui.furnShape === b.dataset.furnshape));
   for (const b of partBtns)
     b.classList.toggle('active', wallMode && ui.wallTool === 'part' && ui.partType === b.dataset.part);
   for (const b of memoToolBtns)
@@ -1170,7 +1215,11 @@ function bindUI() {
   $('modeMemo').addEventListener('click', () => { ui.mode = 'memo'; selection = null; settings.memoVisible = true; updateToolbar(); requestRender(); });
 
   for (const b of wallToolBtns)
-    b.addEventListener('click', () => { ui.wallTool = b.dataset.walltool; selection = null; updateToolbar(); requestRender(); });
+    b.addEventListener('click', () => {
+      ui.wallTool = b.dataset.walltool;
+      if (b.dataset.furnshape) ui.furnShape = b.dataset.furnshape;
+      selection = null; updateToolbar(); requestRender();
+    });
   for (const b of wallStyleBtns)
     b.addEventListener('click', () => { ui.wallTool = 'wall'; ui.wallStyle = b.dataset.wallstyle; selection = null; updateToolbar(); requestRender(); });
   for (const b of partBtns)
