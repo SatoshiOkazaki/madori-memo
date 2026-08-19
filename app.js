@@ -148,9 +148,10 @@ function furnInside(x, y, f) {
  */
 function snapToGrid(v) { return Math.round(v / GRID) * GRID; }
 
-function nearestEndpoint(x, y, maxD) {
+function nearestEndpoint(x, y, maxD, excludeId) {
   let best = null, bd = maxD;
   for (const w of state.walls) {
+    if (w.id === excludeId) continue;   // 伸縮中の壁は自分の端点に吸着させない
     for (const [ex, ey] of [[w.x1, w.y1], [w.x2, w.y2]]) {
       const d = dist(x, y, ex, ey);
       if (d < bd) { bd = d; best = { x: ex, y: ey }; }
@@ -159,9 +160,9 @@ function nearestEndpoint(x, y, maxD) {
   return best;
 }
 
-function snapWallStroke(x1, y1, x2, y2) {
+function snapWallStroke(x1, y1, x2, y2, excludeId) {
   // (1) 始点
-  const sp = nearestEndpoint(x1, y1, ENDPOINT_SNAP)
+  const sp = nearestEndpoint(x1, y1, ENDPOINT_SNAP, excludeId)
     || { x: snapToGrid(x1), y: snapToGrid(y1) };
   // (2) 角度45°スナップ + 長さのグリッド整合
   const dx = x2 - sp.x, dy = y2 - sp.y;
@@ -183,7 +184,7 @@ function snapWallStroke(x1, y1, x2, y2) {
     if (ey === sp.y) ey = sp.y + uy * GRID;
   }
   // (3) 終点の端点吸着
-  const epSnap = nearestEndpoint(ex, ey, ENDPOINT_SNAP);
+  const epSnap = nearestEndpoint(ex, ey, ENDPOINT_SNAP, excludeId);
   if (epSnap) { ex = epSnap.x; ey = epSnap.y; }
   if (dist(sp.x, sp.y, ex, ey) < MIN_WALL_LEN) return null;
   return { x1: sp.x, y1: sp.y, x2: ex, y2: ey };
@@ -479,9 +480,19 @@ function drawFurniture(c, tf, f, selected) {
   c.restore();
 }
 
-/* --- リサイズハンドル（選択中のパーツ両端 / 家具四隅。メイン描画のみ、書き出しには含めない） --- */
+/* --- 操作ハンドル（選択中のパーツ両端 / 家具四隅 / 壁の中点・両端。メイン描画のみ、書き出しには含めない） --- */
 function handlePositions() {
   if (!selection) return [];
+  if (selection.kind === 'wall') {
+    const w = state.walls.find(o => o.id === selection.id);
+    if (!w) return [];
+    // 中点=平行移動（丸）、両端=その端だけ伸縮（四角）
+    return [
+      { kind: 'wall', obj: w, role: 'move', round: true, x: (w.x1 + w.x2) / 2, y: (w.y1 + w.y2) / 2 },
+      { kind: 'wall', obj: w, role: 'end', end: 1, x: w.x1, y: w.y1 },
+      { kind: 'wall', obj: w, role: 'end', end: 2, x: w.x2, y: w.y2 },
+    ];
+  }
   if (selection.kind === 'part') {
     const p = state.parts.find(o => o.id === selection.id);
     if (!p) return [];
@@ -509,10 +520,15 @@ function drawHandles(c, tf) {
     const s = w2s(tf, h.x, h.y);
     const r = HANDLE_SIZE * tf.scale / 2;
     c.fillStyle = COLOR_SELECT;
-    c.fillRect(s.x - r, s.y - r, r * 2, r * 2);
     c.strokeStyle = '#ffffff';
     c.lineWidth = 1.5;
-    c.strokeRect(s.x - r, s.y - r, r * 2, r * 2);
+    if (h.round) {
+      c.beginPath(); c.arc(s.x, s.y, r * 1.15, 0, Math.PI * 2);
+      c.fill(); c.stroke();
+    } else {
+      c.fillRect(s.x - r, s.y - r, r * 2, r * 2);
+      c.strokeRect(s.x - r, s.y - r, r * 2, r * 2);
+    }
   }
 }
 
@@ -658,9 +674,13 @@ function onWheel(e) {
 function startTool(pointerId, p, w) {
   if (ui.mode === 'wall') {
     switch (ui.wallTool) {
-      case 'wall':
-        drag = { type: 'wall', pointerId, sx: w.x, sy: w.y, preview: null };
+      case 'wall': {
+        // 壁線ツールのまま既存の壁を編集できる（ハンドル > 新規描画 / タップは選択）
+        const h = hitHandle(w.x, w.y);
+        if (h && h.kind === 'wall') { startHandleDrag(pointerId, h, w); break; }
+        drag = { type: 'wall', pointerId, sx: w.x, sy: w.y, preview: null, tapped: hitWall(w.x, w.y) };
         break;
+      }
       case 'part': {
         // パーツツールのまま既存パーツを調整できる（ハンドル > 既存パーツ > 新規配置）
         const h = hitHandle(w.x, w.y);
@@ -725,23 +745,34 @@ function startTool(pointerId, p, w) {
   requestRender();
 }
 
-function startSelect(pointerId, w) {
-  // (0) 選択中要素のリサイズハンドル（移動判定より優先）
-  const h = hitHandle(w.x, w.y);
-  if (h) {
-    if (h.kind === 'part') {
-      // 反対側の端をワールド座標で固定
-      const f = rotatePt(-h.sgn * h.obj.width / 2, 0, h.obj.angle);
-      drag = { type: 'resizePart', pointerId, part: h.obj, sgn: h.sgn,
-               fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
-    } else {
-      // 対角の隅をワールド座標で固定
-      const f = rotatePt(-h.sx * h.obj.w / 2, -h.sy * h.obj.h / 2, h.obj.angle);
-      drag = { type: 'resizeFurniture', pointerId, furn: h.obj, sx: h.sx, sy: h.sy,
-               fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
-    }
-    return;
+// ハンドルを掴んだときのドラッグ開始（選択ツール・各ツール共通。pは掴んだワールド座標）
+function startHandleDrag(pointerId, h, p) {
+  if (h.kind === 'part') {
+    // 反対側の端をワールド座標で固定
+    const f = rotatePt(-h.sgn * h.obj.width / 2, 0, h.obj.angle);
+    drag = { type: 'resizePart', pointerId, part: h.obj, sgn: h.sgn,
+             fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+  } else if (h.kind === 'furniture') {
+    // 対角の隅をワールド座標で固定
+    const f = rotatePt(-h.sx * h.obj.w / 2, -h.sy * h.obj.h / 2, h.obj.angle);
+    drag = { type: 'resizeFurniture', pointerId, furn: h.obj, sx: h.sx, sy: h.sy,
+             fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+  } else if (h.role === 'move') {
+    const wl = h.obj;
+    drag = { type: 'moveWall', pointerId, wall: wl,
+             startX: p.x, startY: p.y,
+             orig: { x1: wl.x1, y1: wl.y1, x2: wl.x2, y2: wl.y2 }, started: false };
+  } else {
+    const wl = h.obj;
+    drag = { type: 'stretchWall', pointerId, wall: wl, end: h.end,
+             orig: { x1: wl.x1, y1: wl.y1, x2: wl.x2, y2: wl.y2 }, started: false };
   }
+}
+
+function startSelect(pointerId, w) {
+  // (0) 選択中要素の操作ハンドル（移動判定より優先）
+  const h = hitHandle(w.x, w.y);
+  if (h) { startHandleDrag(pointerId, h, w); return; }
   // ヒット優先順: パーツ > 家具(枠線近傍) > 壁 > 家具(内部)
   const part = hitPart(w.x, w.y);
   if (part) {
@@ -785,7 +816,9 @@ function moveTool(p, w) {
   if (!drag) return;
   switch (drag.type) {
     case 'wall':
-      drag.preview = snapWallStroke(drag.sx, drag.sy, w.x, w.y);
+      // 指先の揺れ程度（画面8px以内）はタップ扱い。動かして初めて新規描画になる
+      if (!drag.moved && dist(drag.sx, drag.sy, w.x, w.y) > 8 / view.scale) drag.moved = true;
+      drag.preview = drag.moved ? snapWallStroke(drag.sx, drag.sy, w.x, w.y) : null;
       break;
     case 'placePart': {
       // 壁沿い成分=位置、垂直成分=ドアの向きサイクル（壁からは離れない）
@@ -829,6 +862,24 @@ function moveTool(p, w) {
       const dy = snapToGrid(drag.orig.y1 + rawDy) - drag.orig.y1;
       drag.wall.x1 = drag.orig.x1 + dx; drag.wall.y1 = drag.orig.y1 + dy;
       drag.wall.x2 = drag.orig.x2 + dx; drag.wall.y2 = drag.orig.y2 + dy;
+      break;
+    }
+    case 'stretchWall': {
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      // 反対側の端を固定して、掴んだ端だけを伸縮（角度45°スナップ・他の壁の端点に吸着）
+      const o = drag.orig;
+      const fx = drag.end === 1 ? o.x2 : o.x1;
+      const fy = drag.end === 1 ? o.y2 : o.y1;
+      const s = snapWallStroke(fx, fy, w.x, w.y, drag.wall.id);
+      if (s) {
+        if (drag.end === 1) {
+          drag.wall.x1 = s.x2; drag.wall.y1 = s.y2;
+          drag.wall.x2 = s.x1; drag.wall.y2 = s.y1;
+        } else {
+          drag.wall.x1 = s.x1; drag.wall.y1 = s.y1;
+          drag.wall.x2 = s.x2; drag.wall.y2 = s.y2;
+        }
+      }
       break;
     }
     case 'placeFurniture':
@@ -882,13 +933,20 @@ function moveTool(p, w) {
 function endTool(p, w) {
   switch (drag.type) {
     case 'wall': {
-      const wall = snapWallStroke(drag.sx, drag.sy, w.x, w.y);
+      const wall = drag.moved ? snapWallStroke(drag.sx, drag.sy, w.x, w.y) : null;
       if (wall) {
         pushHistory();
         const nw = { id: nextId(), ...wall };
         if (ui.wallStyle !== 'normal') nw.style = ui.wallStyle;
         state.walls.push(nw);
+        // 端点ハンドルが次の連結描画を邪魔しないよう、描いた壁は選択しない
+        selection = null;
+        updateToolbar();
         saveSoon();
+      } else if (!drag.moved) {
+        // タップ → 既存の壁を選択（何も無ければ選択解除）
+        selection = drag.tapped ? { kind: 'wall', id: drag.tapped.id } : null;
+        updateToolbar();
       }
       break;
     }
@@ -926,6 +984,7 @@ function endTool(p, w) {
     }
     case 'movePart':
     case 'moveWall':
+    case 'stretchWall':
     case 'moveFurniture':
     case 'resizePart':
     case 'resizeFurniture':
