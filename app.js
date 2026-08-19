@@ -31,6 +31,8 @@ const PART_W_STEP = 10;       // パーツ幅変更のスナップ刻み
 const MIN_FURN = 20;          // 家具枠の最小サイズ（幅・高さ）
 const FURN_LINE_W = 2;        // 家具枠の線幅（ワールド単位）
 const HANDLE_SIZE = 12;       // リサイズハンドルの一辺（ワールド単位）
+const TEXT_PAD = 6;           // 文字の当たり判定の余白（ワールド単位）
+const textFont = size => `${size}px "Hiragino Sans", "Hiragino Kaku Gothic ProN", -apple-system, sans-serif`;
 const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
 const HISTORY_MAX = 60;       // アンドゥ段数（>50）
 const STORE_KEY = 'madori-memo-v1';
@@ -47,8 +49,9 @@ const COLOR_SELECT = '#2563eb';
  *                                                                flipはドア用: H=吊元左右, V=開き内外。未定義=false）
  * state.strokes  : [{id, color, width, dash?, points:[...]}]  … メモの手書き線（dash未定義=実線）
  * state.furniture: [{id, x, y, w, h, angle(度), shape?}]      … 家具枠（中心+サイズ+角度。shape:'ellipse'=楕円、未定義=四角）
+ * state.texts    : [{id, x, y, text, size, color, angle(度)}] … 文字（中心基準）
  */
-let state = { walls: [], parts: [], strokes: [], furniture: [] };
+let state = { walls: [], parts: [], strokes: [], furniture: [], texts: [] };
 let view = { x: 0, y: 0, scale: 1 };                 // 表示中ワールド左上と倍率
 let settings = { grid: true, memoVisible: true };
 let ui = {
@@ -56,13 +59,14 @@ let ui = {
   wallTool: 'wall',    // 'wall' | 'part' | 'furniture' | 'select' | 'eraser'
   wallStyle: 'normal', // 'normal'(太実線) | 'thin'(細実線) | 'dash'(細点線)
   partType: 'door',    // 'door' | 'slide' | 'window'
-  memoTool: 'pen',     // 'pen' | 'eraser'
+  memoTool: 'pen',     // 'pen' | 'text' | 'eraser'
   memoColor: '#111111',
   memoWidth: 3,
+  textSize: 40,        // 文字の大きさ（ワールド単位）
   memoDash: false,     // 点線モード
   furnShape: 'rect',   // 家具の形状: 'rect' | 'ellipse'
 };
-let selection = null;  // {kind:'wall'|'part'|'furniture', id} | null
+let selection = null;  // {kind:'wall'|'part'|'furniture'|'text', id} | null
 let idSeq = 1;
 const nextId = () => idSeq++;
 
@@ -284,11 +288,12 @@ function loadStored() {
     const data = JSON.parse(raw);
     if (data.state) state = data.state;
     if (!state.furniture) state.furniture = [];   // 旧データ（v1.0）互換
+    if (!state.texts) state.texts = [];           // 旧データ（〜v1.7）互換
     if (data.view) view = data.view;
     if (data.settings) settings = Object.assign(settings, data.settings);
     // idの継続性を確保
     let maxId = 0;
-    for (const arr of [state.walls, state.parts, state.strokes, state.furniture])
+    for (const arr of [state.walls, state.parts, state.strokes, state.furniture, state.texts])
       for (const o of arr) maxId = Math.max(maxId, o.id || 0);
     idSeq = maxId + 1;
   } catch (e) { /* 壊れたデータは無視して初期状態 */ }
@@ -360,9 +365,10 @@ function drawScene(c, tf, opts) {
   for (const p of state.parts) {
     drawPart(c, tf, p, sel && sel.kind === 'part' && sel.id === p.id);
   }
-  // メモ
+  // メモ（手書き線と文字）
   if (opts.memoVisible) {
     for (const s of state.strokes) drawStroke(c, tf, s);
+    for (const t of state.texts) drawText(c, tf, t, sel && sel.kind === 'text' && sel.id === t.id);
   }
 }
 
@@ -399,6 +405,38 @@ function drawStroke(c, tf, s) {
   }
   c.stroke();
   c.setLineDash([]);
+}
+
+// 文字の外形（ワールド単位）。measureTextは変換行列に依存しないので世界座標のまま測れる
+function textBox(t) {
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.font = textFont(t.size);
+  const w = ctx.measureText(t.text || '').width;
+  ctx.restore();
+  return { w, h: t.size * 1.25 };
+}
+
+function drawText(c, tf, t, selected) {
+  const s = w2s(tf, t.x, t.y);
+  c.save();
+  c.translate(s.x, s.y);
+  c.rotate((t.angle || 0) * Math.PI / 180);
+  c.scale(tf.scale, tf.scale);   // 以降ワールド単位で描ける
+  c.font = textFont(t.size);
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.fillStyle = t.color;
+  c.fillText(t.text, 0, 0);
+  if (selected) {
+    const b = textBox(t);
+    c.strokeStyle = COLOR_SELECT;
+    c.lineWidth = 2;
+    c.setLineDash([6, 4]);
+    c.strokeRect(-b.w / 2 - TEXT_PAD, -b.h / 2 - TEXT_PAD, b.w + TEXT_PAD * 2, b.h + TEXT_PAD * 2);
+    c.setLineDash([]);
+  }
+  c.restore();
 }
 
 function drawPart(c, tf, p, selected) {
@@ -736,6 +774,20 @@ function startTool(pointerId, p, w) {
       case 'pen':
         drag = { type: 'stroke', pointerId, points: [w.x, w.y] };
         break;
+      case 'text': {
+        // 既存の文字はタップで編集・ドラッグで移動、空きスペースは新規入力
+        const t = hitText(w.x, w.y);
+        if (t) {
+          selection = { kind: 'text', id: t.id };
+          drag = { type: 'moveText', pointerId, text: t, offX: w.x - t.x, offY: w.y - t.y,
+                   sx: w.x, sy: w.y, moved: false, started: false };
+        } else {
+          selection = null;
+          drag = { type: 'newText', pointerId, x: w.x, y: w.y };
+        }
+        updateToolbar();
+        break;
+      }
       case 'eraser':
         drag = { type: 'erase', pointerId, last: w, cursor: w, pushed: false, target: 'memo' };
         eraseAlong(w, w);
@@ -927,6 +979,15 @@ function moveTool(p, w) {
       if (dist(lx, ly, w.x, w.y) > 1.5 / view.scale) pts.push(w.x, w.y);
       break;
     }
+    case 'moveText': {
+      // 画面8px以内はタップ扱い（離したときに編集を開く）
+      if (!drag.moved && dist(drag.sx, drag.sy, w.x, w.y) > 8 / view.scale) drag.moved = true;
+      if (!drag.moved) break;
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      drag.text.x = w.x - drag.offX;
+      drag.text.y = w.y - drag.offY;
+      break;
+    }
   }
 }
 
@@ -997,6 +1058,13 @@ function endTool(p, w) {
         saveSoon();
       }
       break;
+    case 'newText':
+      openTextEditor(drag.x, drag.y, null);
+      break;
+    case 'moveText':
+      if (drag.moved) saveSoon();
+      else openTextEditor(drag.text.x, drag.text.y, drag.text);   // タップ＝編集
+      break;
     case 'erase':
       if (drag.pushed) saveSoon();
       break;
@@ -1038,6 +1106,17 @@ function hitFurniture(x, y, edgeOnly) {
     const f = state.furniture[i];
     if (furnBorderDist(x, y, f) <= tol) return f;
     if (!edgeOnly && furnInside(x, y, f)) return f;
+  }
+  return null;
+}
+
+// 文字の当たり判定（中心基準の回転矩形。tolは追加の余白）
+function hitText(x, y, tol = 0) {
+  for (let i = state.texts.length - 1; i >= 0; i--) {
+    const t = state.texts[i];
+    const b = textBox(t);
+    const l = rotatePt(x - t.x, y - t.y, -(t.angle || 0));
+    if (Math.abs(l.x) <= b.w / 2 + TEXT_PAD + tol && Math.abs(l.y) <= b.h / 2 + TEXT_PAD + tol) return t;
   }
   return null;
 }
@@ -1093,6 +1172,11 @@ function eraseAt(x, y) {
     removeFrom(state.furniture, f => furnBorderDist(x, y, f) <= r);
   } else {
     eraseStrokeSpan(x, y, r, markHistory);
+    removeFrom(state.texts, t => {
+      const b = textBox(t);
+      const l = rotatePt(x - t.x, y - t.y, -(t.angle || 0));
+      return Math.abs(l.x) <= b.w / 2 + r && Math.abs(l.y) <= b.h / 2 + r;
+    });
   }
   updateToolbar();
 }
@@ -1167,6 +1251,9 @@ function rotateSelection() {
   } else if (selection.kind === 'furniture') {
     const f = state.furniture.find(o => o.id === selection.id);
     if (f) f.angle = (f.angle + 90) % 360;
+  } else if (selection.kind === 'text') {
+    const t = state.texts.find(o => o.id === selection.id);
+    if (t) t.angle = ((t.angle || 0) + 90) % 360;
   } else {
     const w = state.walls.find(o => o.id === selection.id);
     if (w) {
@@ -1186,6 +1273,7 @@ function deleteSelection() {
   pushHistory();
   if (selection.kind === 'part') state.parts = state.parts.filter(o => o.id !== selection.id);
   else if (selection.kind === 'furniture') state.furniture = state.furniture.filter(o => o.id !== selection.id);
+  else if (selection.kind === 'text') state.texts = state.texts.filter(o => o.id !== selection.id);
   else state.walls = state.walls.filter(o => o.id !== selection.id);
   selection = null;
   afterMutation();
@@ -1201,6 +1289,16 @@ function nudgeWidth(delta) {
   afterMutation();
 }
 
+// 色・サイズのボタンは、文字を選択中ならその文字にも反映する
+function applyToSelectedText(prop, value) {
+  if (!selection || selection.kind !== 'text') return;
+  const t = state.texts.find(o => o.id === selection.id);
+  if (!t || t[prop] === value) return;
+  pushHistory();
+  t[prop] = value;
+  afterMutation();
+}
+
 // ドアの反転（prop: 'flipH'=吊元左右, 'flipV'=開き内外）。選択中のドアのみ有効
 function flipSelection(prop) {
   if (!selection || selection.kind !== 'part') return;
@@ -1213,8 +1311,9 @@ function flipSelection(prop) {
 
 function clearAll() {
   if (!confirm('すべての壁・パーツ・メモを削除します。よろしいですか？')) return;
+  closeTextEditor(false);
   pushHistory();
-  state = { walls: [], parts: [], strokes: [], furniture: [] };
+  state = { walls: [], parts: [], strokes: [], furniture: [], texts: [] };
   selection = null;
   afterMutation();
 }
@@ -1225,6 +1324,58 @@ function resetView() {
   view.y = -cssH / 2;
   requestRender();
   saveSoon();
+}
+
+/* --- 文字入力（キャンバス上にHTMLの入力欄を重ねる。Apple Pencilのスクリブルもそのまま使える） --- */
+let textEditor = null;   // {el, id, x, y}
+
+function openTextEditor(wx, wy, existing) {
+  closeTextEditor(true);
+  const el = document.createElement('input');
+  el.type = 'text';
+  el.className = 'text-editor';
+  el.enterKeyHint = 'done';
+  el.value = existing ? existing.text : '';
+  const s = w2s(view, wx, wy);
+  el.style.left = `${s.x}px`;
+  el.style.top = `${s.y}px`;
+  el.style.fontSize = `${Math.max(16, (existing ? existing.size : ui.textSize) * view.scale)}px`;
+  el.style.color = existing ? existing.color : ui.memoColor;
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); closeTextEditor(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); closeTextEditor(false); }
+  });
+  el.addEventListener('blur', () => closeTextEditor(true));
+  document.getElementById('stage').appendChild(el);
+  textEditor = { el, id: existing ? existing.id : null, x: wx, y: wy };
+  el.focus();          // iOSでキーボードを出すためタップ操作と同じ処理内で同期的に呼ぶ
+  el.select();
+}
+
+function closeTextEditor(commit) {
+  if (!textEditor) return;
+  const { el, id, x, y } = textEditor;
+  textEditor = null;                 // blurの二重発火を防ぐため先に落とす
+  const val = el.value.trim();
+  el.remove();
+  if (!commit) { requestRender(); return; }
+  const existing = id ? state.texts.find(o => o.id === id) : null;
+  if (existing) {
+    if (val === existing.text) return;
+    pushHistory();
+    if (val) existing.text = val;
+    else {                            // 空にして確定＝削除
+      state.texts = state.texts.filter(o => o.id !== id);
+      selection = null;
+    }
+  } else {
+    if (!val) return;
+    pushHistory();
+    const nt = { id: nextId(), x, y, text: val, size: ui.textSize, color: ui.memoColor, angle: 0 };
+    state.texts.push(nt);
+    selection = { kind: 'text', id: nt.id };
+  }
+  afterMutation();
 }
 
 /* ===== 11. PNG書き出し ===== */
@@ -1240,6 +1391,10 @@ function computeBBox() {
   if (settings.memoVisible) {
     for (const s of state.strokes)
       for (let i = 0; i + 1 < s.points.length; i += 2) add(s.points[i], s.points[i + 1], s.width);
+    for (const t of state.texts) {
+      const b = textBox(t);
+      add(t.x, t.y, Math.hypot(b.w, b.h) / 2 + TEXT_PAD);   // 回転対応の外接円
+    }
   }
   return (minX === Infinity) ? null : { minX, minY, maxX, maxY };
 }
@@ -1293,14 +1448,16 @@ const memoToolBtns = [...document.querySelectorAll('[data-memotool]')];
 const colorBtns = [...document.querySelectorAll('[data-color]')];
 const widthBtns = [...document.querySelectorAll('[data-penwidth]')];
 const dashBtns = [...document.querySelectorAll('[data-dash]')];
+const textSizeBtns = [...document.querySelectorAll('[data-textsize]')];
 
 function updateToolbar() {
   const wallMode = ui.mode === 'wall';
   $('modeWall').classList.toggle('active', wallMode);
   $('modeMemo').classList.toggle('active', !wallMode);
   $('wallTools').hidden = !wallMode;
+  const textSelected = !!selection && selection.kind === 'text';
   $('wallStyles').hidden = !wallMode || ui.wallTool !== 'wall';
-  $('selActions').hidden = !wallMode;
+  $('selActions').hidden = !wallMode && !textSelected;   // 文字選択中はメモモードでも操作を出す
   $('memoTools').hidden = wallMode;
 
   for (const b of wallStyleBtns)
@@ -1319,6 +1476,8 @@ function updateToolbar() {
     b.classList.toggle('active', ui.memoWidth === Number(b.dataset.penwidth));
   for (const b of dashBtns)
     b.classList.toggle('active', ui.memoDash === (b.dataset.dash === '1'));
+  for (const b of textSizeBtns)
+    b.classList.toggle('active', ui.textSize === Number(b.dataset.textsize));
 
   // 選択中パーツがドアのときのみ吊元/開き反転ボタンを有効化
   const selPart = selection && selection.kind === 'part'
@@ -1338,7 +1497,7 @@ function updateToolbar() {
 }
 
 function bindUI() {
-  $('modeWall').addEventListener('click', () => { ui.mode = 'wall'; selection = null; updateToolbar(); requestRender(); });
+  $('modeWall').addEventListener('click', () => { closeTextEditor(true); ui.mode = 'wall'; selection = null; updateToolbar(); requestRender(); });
   $('modeMemo').addEventListener('click', () => { ui.mode = 'memo'; selection = null; settings.memoVisible = true; updateToolbar(); requestRender(); });
 
   for (const b of wallToolBtns)
@@ -1352,13 +1511,25 @@ function bindUI() {
   for (const b of partBtns)
     b.addEventListener('click', () => { ui.wallTool = 'part'; ui.partType = b.dataset.part; selection = null; updateToolbar(); requestRender(); });
   for (const b of memoToolBtns)
-    b.addEventListener('click', () => { ui.memoTool = b.dataset.memotool; updateToolbar(); });
+    b.addEventListener('click', () => { closeTextEditor(true); ui.memoTool = b.dataset.memotool; updateToolbar(); });
   for (const b of colorBtns)
-    b.addEventListener('click', () => { ui.memoColor = b.dataset.color; ui.memoTool = 'pen'; updateToolbar(); });
+    b.addEventListener('click', () => {
+      ui.memoColor = b.dataset.color;
+      if (ui.memoTool !== 'text') ui.memoTool = 'pen';
+      applyToSelectedText('color', ui.memoColor);
+      updateToolbar();
+    });
   for (const b of widthBtns)
     b.addEventListener('click', () => { ui.memoWidth = Number(b.dataset.penwidth); ui.memoTool = 'pen'; updateToolbar(); });
   for (const b of dashBtns)
     b.addEventListener('click', () => { ui.memoDash = b.dataset.dash === '1'; ui.memoTool = 'pen'; updateToolbar(); });
+  for (const b of textSizeBtns)
+    b.addEventListener('click', () => {
+      ui.textSize = Number(b.dataset.textsize);
+      ui.memoTool = 'text';
+      applyToSelectedText('size', ui.textSize);
+      updateToolbar();
+    });
 
   $('btnUndo').addEventListener('click', undo);
   $('btnRedo').addEventListener('click', redo);
