@@ -540,6 +540,19 @@ function handlePositions() {
       return { kind: 'part', obj: p, sgn, x: p.x + r.x, y: p.y + r.y };
     });
   }
+  if (selection.kind === 'text') {
+    const t = state.texts.find(o => o.id === selection.id);
+    if (!t) return [];
+    // 四隅（文字の外形＋余白）。掴んでドラッグすると中心を保ったままサイズが変わる
+    const b = textBox(t);
+    const hw = b.w / 2 + TEXT_PAD, hh = b.h / 2 + TEXT_PAD;
+    const out = [];
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+      const r = rotatePt(sx * hw, sy * hh, t.angle || 0);
+      out.push({ kind: 'text', obj: t, x: t.x + r.x, y: t.y + r.y });
+    }
+    return out;
+  }
   if (selection.kind === 'furniture') {
     const f = state.furniture.find(o => o.id === selection.id);
     if (!f) return [];
@@ -775,12 +788,15 @@ function startTool(pointerId, p, w) {
         drag = { type: 'stroke', pointerId, points: [w.x, w.y] };
         break;
       case 'text': {
-        // 既存の文字はタップで編集・ドラッグで移動、空きスペースは新規入力
+        // ハンドル > 既存の文字（1回目=選択 / 2回目=編集、ドラッグで移動）> 空きスペースは新規入力
+        const h = hitHandle(w.x, w.y);
+        if (h && h.kind === 'text') { startHandleDrag(pointerId, h, w); break; }
         const t = hitText(w.x, w.y);
         if (t) {
+          const wasSelected = !!selection && selection.kind === 'text' && selection.id === t.id;
           selection = { kind: 'text', id: t.id };
           drag = { type: 'moveText', pointerId, text: t, offX: w.x - t.x, offY: w.y - t.y,
-                   sx: w.x, sy: w.y, moved: false, started: false };
+                   sx: w.x, sy: w.y, moved: false, started: false, wasSelected };
         } else {
           selection = null;
           drag = { type: 'newText', pointerId, x: w.x, y: w.y };
@@ -804,6 +820,11 @@ function startHandleDrag(pointerId, h, p) {
     const f = rotatePt(-h.sgn * h.obj.width / 2, 0, h.obj.angle);
     drag = { type: 'resizePart', pointerId, part: h.obj, sgn: h.sgn,
              fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
+  } else if (h.kind === 'text') {
+    // 掴んだ点の中心からの距離を基準に、文字サイズを比例させる（中心は動かさない）
+    const t = h.obj;
+    drag = { type: 'resizeText', pointerId, text: t, size0: t.size,
+             d0: Math.max(1, dist(p.x, p.y, t.x, t.y)), started: false };
   } else if (h.kind === 'furniture') {
     // 対角の隅をワールド座標で固定
     const f = rotatePt(-h.sx * h.obj.w / 2, -h.sy * h.obj.h / 2, h.obj.angle);
@@ -979,6 +1000,14 @@ function moveTool(p, w) {
       if (dist(lx, ly, w.x, w.y) > 1.5 / view.scale) pts.push(w.x, w.y);
       break;
     }
+    case 'resizeText': {
+      if (!drag.started) { pushHistory(); drag.started = true; }
+      const t = drag.text;
+      const d = dist(w.x, w.y, t.x, t.y);
+      const raw = drag.size0 * d / drag.d0;
+      t.size = Math.max(14, Math.min(240, Math.round(raw / 2) * 2));
+      break;
+    }
     case 'moveText': {
       // 画面8px以内はタップ扱い（離したときに編集を開く）
       if (!drag.moved && dist(drag.sx, drag.sy, w.x, w.y) > 8 / view.scale) drag.moved = true;
@@ -1062,8 +1091,12 @@ function endTool(p, w) {
       openTextEditor(drag.x, drag.y, null);
       break;
     case 'moveText':
+      // 1回目のタップは選択のみ、選択中の文字をもう一度タップしたら編集
       if (drag.moved) saveSoon();
-      else openTextEditor(drag.text.x, drag.text.y, drag.text);   // タップ＝編集
+      else if (drag.wasSelected) openTextEditor(drag.text.x, drag.text.y, drag.text);
+      break;
+    case 'resizeText':
+      if (drag.started) saveSoon();
       break;
     case 'erase':
       if (drag.pushed) saveSoon();
