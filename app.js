@@ -31,6 +31,8 @@ const MIN_PART_W = 30;        // パーツ幅の最小値
 const PART_W_STEP = 10;       // パーツ幅変更のスナップ刻み
 const MIN_FURN = 20;          // 家具枠の最小サイズ（幅・高さ）
 const FURN_LINE_W = 2;        // 家具枠の線幅（ワールド単位）
+const ARROW_W = 3;            // 矢印の線幅（ワールド単位）
+const ARROW_HEAD = 22;        // 矢じりの長さ（ワールド単位）
 const HANDLE_SIZE = 12;       // リサイズハンドルの一辺（ワールド単位）
 const TEXT_PAD = 6;           // 文字の当たり判定の余白（ワールド単位）
 const textFont = size => `${size}px "Hiragino Sans", "Hiragino Kaku Gothic ProN", -apple-system, sans-serif`;
@@ -51,13 +53,14 @@ const COLOR_SELECT = '#2563eb';
  * state.strokes  : [{id, color, width, dash?, points:[...]}]  … メモの手書き線（dash未定義=実線）
  * state.furniture: [{id, x, y, w, h, angle(度), shape?}]      … 家具枠（中心+サイズ+角度。shape:'ellipse'=楕円、未定義=四角）
  * state.texts    : [{id, x, y, text, size, color, angle(度)}] … 文字（中心基準）
+ * state.arrows   : [{id, x1, y1, x2, y2}]                     … 矢印（x2,y2側が先端。角度は自由）
  */
-let state = { walls: [], parts: [], strokes: [], furniture: [], texts: [] };
+let state = { walls: [], parts: [], strokes: [], furniture: [], texts: [], arrows: [] };
 let view = { x: 0, y: 0, scale: 1 };                 // 表示中ワールド左上と倍率
 let settings = { grid: true, memoVisible: true };
 let ui = {
   mode: 'wall',        // 'wall' | 'memo'
-  wallTool: 'wall',    // 'wall' | 'part' | 'furniture' | 'select' | 'eraser'
+  wallTool: 'wall',    // 'wall' | 'part' | 'furniture' | 'arrow' | 'select' | 'eraser'
   wallStyle: 'normal', // 'normal'(太実線) | 'thin'(細実線) | 'dash'(細点線)
   partType: 'door',    // 'door' | 'slide' | 'window'
   memoTool: 'pen',     // 'pen' | 'text' | 'eraser'
@@ -166,33 +169,14 @@ function nearestEndpoint(x, y, maxD, excludeId) {
 }
 
 function snapWallStroke(x1, y1, x2, y2, excludeId) {
-  // (1) 始点
+  // 角度は自由。始点・終点だけを「既存の壁の端点 → なければグリッド交点」に吸着させる。
+  // （水平・垂直も、グリッド1マスの範囲でまっすぐ引けば自然に揃う）
   const sp = nearestEndpoint(x1, y1, ENDPOINT_SNAP, excludeId)
     || { x: snapToGrid(x1), y: snapToGrid(y1) };
-  // (2) 角度45°スナップ + 長さのグリッド整合
-  const dx = x2 - sp.x, dy = y2 - sp.y;
-  const len = Math.hypot(dx, dy);
-  if (len < 5) return null;
-  const step = Math.PI / 4;
-  const ang = Math.round(Math.atan2(dy, dx) / step) * step;
-  const ux = Math.round(Math.cos(ang)), uy = Math.round(Math.sin(ang)); // -1/0/1
-  let ex, ey;
-  if (ux !== 0 && uy !== 0) {
-    // 斜め45°: 両成分を同じグリッド倍数にして角度を厳密に保つ
-    const k = Math.max(GRID, Math.round(len / Math.SQRT2 / GRID) * GRID);
-    ex = sp.x + ux * k; ey = sp.y + uy * k;
-  } else if (ux !== 0) {
-    ex = snapToGrid(sp.x + ux * len); ey = sp.y;
-    if (ex === sp.x) ex = sp.x + ux * GRID;
-  } else {
-    ex = sp.x; ey = snapToGrid(sp.y + uy * len);
-    if (ey === sp.y) ey = sp.y + uy * GRID;
-  }
-  // (3) 終点の端点吸着
-  const epSnap = nearestEndpoint(ex, ey, ENDPOINT_SNAP, excludeId);
-  if (epSnap) { ex = epSnap.x; ey = epSnap.y; }
-  if (dist(sp.x, sp.y, ex, ey) < MIN_WALL_LEN) return null;
-  return { x1: sp.x, y1: sp.y, x2: ex, y2: ey };
+  const ep = nearestEndpoint(x2, y2, ENDPOINT_SNAP, excludeId)
+    || { x: snapToGrid(x2), y: snapToGrid(y2) };
+  if (dist(sp.x, sp.y, ep.x, ep.y) < MIN_WALL_LEN) return null;
+  return { x1: sp.x, y1: sp.y, x2: ep.x, y2: ep.y };
 }
 
 // パーツを最寄りの壁の線上に固定配置する（壁が無ければnull）
@@ -286,19 +270,19 @@ function saveNow() {                       // 作業中の状態の自動保存�
   } catch (e) { /* 容量超過などは黙って無視 */ }
 }
 
-const emptyState = () => ({ walls: [], parts: [], strokes: [], furniture: [], texts: [] });
+const STATE_ARRAYS = ['walls', 'parts', 'strokes', 'furniture', 'texts', 'arrows'];
+const emptyState = () => Object.fromEntries(STATE_ARRAYS.map(k => [k, []]));
 
 // 旧バージョンのデータに無い配列を補う
 function ensureStateShape() {
-  for (const k of ['walls', 'parts', 'strokes', 'furniture', 'texts'])
-    if (!state[k]) state[k] = [];
+  for (const k of STATE_ARRAYS) if (!state[k]) state[k] = [];
 }
 
 // 読み込んだデータのidと重複しないようにidの採番を進める
 function reindexIds() {
   let maxId = 0;
-  for (const arr of [state.walls, state.parts, state.strokes, state.furniture, state.texts])
-    for (const o of arr) maxId = Math.max(maxId, o.id || 0);
+  for (const k of STATE_ARRAYS)
+    for (const o of state[k]) maxId = Math.max(maxId, o.id || 0);
   idSeq = maxId + 1;
 }
 function loadStored() {
@@ -382,6 +366,10 @@ function drawScene(c, tf, opts) {
   for (const p of state.parts) {
     drawPart(c, tf, p, sel && sel.kind === 'part' && sel.id === p.id);
   }
+  // 矢印
+  for (const a of state.arrows) {
+    drawArrow(c, tf, a, sel && sel.kind === 'arrow' && sel.id === a.id);
+  }
   // メモ（手書き線と文字）
   if (opts.memoVisible) {
     for (const s of state.strokes) drawStroke(c, tf, s);
@@ -422,6 +410,28 @@ function drawStroke(c, tf, s) {
   }
   c.stroke();
   c.setLineDash([]);
+}
+
+function drawArrow(c, tf, a, selected) {
+  const p1 = w2s(tf, a.x1, a.y1), p2 = w2s(tf, a.x2, a.y2);
+  const ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+  const head = ARROW_HEAD * tf.scale;
+  const spread = 0.42;
+  const stroke = (color, width) => {
+    c.strokeStyle = color;
+    c.fillStyle = color;
+    c.lineWidth = width * tf.scale;
+    c.lineCap = 'round';
+    c.lineJoin = 'round';
+    c.beginPath(); c.moveTo(p1.x, p1.y); c.lineTo(p2.x, p2.y); c.stroke();
+    c.beginPath();
+    c.moveTo(p2.x, p2.y);
+    c.lineTo(p2.x - head * Math.cos(ang - spread), p2.y - head * Math.sin(ang - spread));
+    c.lineTo(p2.x - head * Math.cos(ang + spread), p2.y - head * Math.sin(ang + spread));
+    c.closePath(); c.fill();
+  };
+  if (selected) stroke('rgba(37,99,235,0.45)', ARROW_W + 8);
+  stroke(COLOR_WALL, ARROW_W);
 }
 
 // 文字の外形（ワールド単位）。measureTextは変換行列に依存しないので世界座標のまま測れる
@@ -538,14 +548,16 @@ function drawFurniture(c, tf, f, selected) {
 /* --- 操作ハンドル（選択中のパーツ両端 / 家具四隅 / 壁の中点・両端。メイン描画のみ、書き出しには含めない） --- */
 function handlePositions() {
   if (!selection) return [];
-  if (selection.kind === 'wall') {
-    const w = state.walls.find(o => o.id === selection.id);
+  if (selection.kind === 'wall' || selection.kind === 'arrow') {
+    const kind = selection.kind;
+    const src = kind === 'wall' ? state.walls : state.arrows;
+    const w = src.find(o => o.id === selection.id);
     if (!w) return [];
     // 中点=平行移動（丸）、両端=その端だけ伸縮（四角）
     return [
-      { kind: 'wall', obj: w, role: 'move', round: true, x: (w.x1 + w.x2) / 2, y: (w.y1 + w.y2) / 2 },
-      { kind: 'wall', obj: w, role: 'end', end: 1, x: w.x1, y: w.y1 },
-      { kind: 'wall', obj: w, role: 'end', end: 2, x: w.x2, y: w.y2 },
+      { kind, obj: w, role: 'move', round: true, x: (w.x1 + w.x2) / 2, y: (w.y1 + w.y2) / 2 },
+      { kind, obj: w, role: 'end', end: 1, x: w.x1, y: w.y1 },
+      { kind, obj: w, role: 'end', end: 2, x: w.x2, y: w.y2 },
     ];
   }
   if (selection.kind === 'part') {
@@ -609,6 +621,11 @@ function drawOverlay(c, tf) {
   }
   if (drag.type === 'stroke' && drag.points.length >= 4) {
     drawStroke(c, tf, { color: ui.memoColor, width: ui.memoWidth, dash: ui.memoDash, points: drag.points });
+  }
+  if (drag.type === 'arrow' && drag.preview) {
+    c.globalAlpha = 0.6;
+    drawArrow(c, tf, drag.preview, false);
+    c.globalAlpha = 1;
   }
   if (drag.type === 'placeFurniture') {
     const cx = (drag.sx + drag.ex) / 2, cy = (drag.sy + drag.ey) / 2;
@@ -749,6 +766,13 @@ function startTool(pointerId, p, w) {
         drag = { type: 'wall', pointerId, sx: w.x, sy: w.y, preview: null, tapped: hitWall(w.x, w.y) };
         break;
       }
+      case 'arrow': {
+        // 矢印ツールのまま既存の矢印を編集できる（ハンドル > 新規描画 / タップは選択）
+        const h = hitHandle(w.x, w.y);
+        if (h && h.kind === 'arrow') { startHandleDrag(pointerId, h, w); break; }
+        drag = { type: 'arrow', pointerId, sx: w.x, sy: w.y, preview: null, tapped: hitArrow(w.x, w.y) };
+        break;
+      }
       case 'part': {
         // パーツツールのまま既存パーツを調整できる（ハンドル > 既存パーツ > 新規配置）
         const h = hitHandle(w.x, w.y);
@@ -849,12 +873,12 @@ function startHandleDrag(pointerId, h, p) {
              fx: h.obj.x + f.x, fy: h.obj.y + f.y, started: false };
   } else if (h.role === 'move') {
     const wl = h.obj;
-    drag = { type: 'moveWall', pointerId, wall: wl,
+    drag = { type: 'moveWall', pointerId, wall: wl, snap: h.kind === 'wall',
              startX: p.x, startY: p.y,
              orig: { x1: wl.x1, y1: wl.y1, x2: wl.x2, y2: wl.y2 }, started: false };
   } else {
     const wl = h.obj;
-    drag = { type: 'stretchWall', pointerId, wall: wl, end: h.end,
+    drag = { type: 'stretchWall', pointerId, wall: wl, end: h.end, snap: h.kind === 'wall',
              orig: { x1: wl.x1, y1: wl.y1, x2: wl.x2, y2: wl.y2 }, started: false };
   }
 }
@@ -878,11 +902,23 @@ function startSelect(pointerId, w) {
     updateToolbar();
     return;
   }
+  const arrow = hitArrow(w.x, w.y);
+  if (arrow) {
+    selection = { kind: 'arrow', id: arrow.id };
+    drag = {
+      type: 'moveWall', pointerId, wall: arrow, snap: false,
+      startX: w.x, startY: w.y,
+      orig: { x1: arrow.x1, y1: arrow.y1, x2: arrow.x2, y2: arrow.y2 },
+      started: false,
+    };
+    updateToolbar();
+    return;
+  }
   const wall = hitWall(w.x, w.y);
   if (wall) {
     selection = { kind: 'wall', id: wall.id };
     drag = {
-      type: 'moveWall', pointerId, wall,
+      type: 'moveWall', pointerId, wall, snap: true,
       startX: w.x, startY: w.y,
       orig: { x1: wall.x1, y1: wall.y1, x2: wall.x2, y2: wall.y2 },
       started: false,
@@ -946,10 +982,10 @@ function moveTool(p, w) {
     }
     case 'moveWall': {
       if (!drag.started) { pushHistory(); drag.started = true; }
-      // 平行移動量をグリッド刻みにスナップ（整列を保つ）
+      // 壁は平行移動量をグリッド刻みにスナップ（整列を保つ）。矢印は自由移動
       const rawDx = w.x - drag.startX, rawDy = w.y - drag.startY;
-      const dx = snapToGrid(drag.orig.x1 + rawDx) - drag.orig.x1;
-      const dy = snapToGrid(drag.orig.y1 + rawDy) - drag.orig.y1;
+      const dx = drag.snap ? snapToGrid(drag.orig.x1 + rawDx) - drag.orig.x1 : rawDx;
+      const dy = drag.snap ? snapToGrid(drag.orig.y1 + rawDy) - drag.orig.y1 : rawDy;
       drag.wall.x1 = drag.orig.x1 + dx; drag.wall.y1 = drag.orig.y1 + dy;
       drag.wall.x2 = drag.orig.x2 + dx; drag.wall.y2 = drag.orig.y2 + dy;
       break;
@@ -960,7 +996,9 @@ function moveTool(p, w) {
       const o = drag.orig;
       const fx = drag.end === 1 ? o.x2 : o.x1;
       const fy = drag.end === 1 ? o.y2 : o.y1;
-      const s = snapWallStroke(fx, fy, w.x, w.y, drag.wall.id);
+      const s = drag.snap
+        ? snapWallStroke(fx, fy, w.x, w.y, drag.wall.id)
+        : { x1: fx, y1: fy, x2: w.x, y2: w.y };     // 矢印は自由
       if (s) {
         if (drag.end === 1) {
           drag.wall.x1 = s.x2; drag.wall.y1 = s.y2;
@@ -972,6 +1010,11 @@ function moveTool(p, w) {
       }
       break;
     }
+    case 'arrow':
+      // 画面8px以内はタップ扱い（離したときに選択）
+      if (!drag.moved && dist(drag.sx, drag.sy, w.x, w.y) > 8 / view.scale) drag.moved = true;
+      drag.preview = drag.moved ? { x1: drag.sx, y1: drag.sy, x2: w.x, y2: w.y } : null;
+      break;
     case 'placeFurniture':
       drag.ex = w.x; drag.ey = w.y;
       break;
@@ -1073,6 +1116,20 @@ function endTool(p, w) {
       saveSoon();
       break;
     }
+    case 'arrow': {
+      if (drag.moved && dist(drag.sx, drag.sy, w.x, w.y) >= MIN_WALL_LEN) {
+        pushHistory();
+        state.arrows.push({ id: nextId(), x1: drag.sx, y1: drag.sy, x2: w.x, y2: w.y });
+        selection = null;
+        updateToolbar();
+        saveSoon();
+      } else if (!drag.moved) {
+        // タップ → 既存の矢印を選択（何も無ければ選択解除）
+        selection = drag.tapped ? { kind: 'arrow', id: drag.tapped.id } : null;
+        updateToolbar();
+      }
+      break;
+    }
     case 'placeFurniture': {
       const x1 = Math.min(drag.sx, drag.ex), x2 = Math.max(drag.sx, drag.ex);
       const y1 = Math.min(drag.sy, drag.ey), y2 = Math.max(drag.sy, drag.ey);
@@ -1160,6 +1217,16 @@ function hitFurniture(x, y, edgeOnly) {
   return null;
 }
 
+// 矢印の当たり判定（線分の近傍）
+function hitArrow(x, y) {
+  const tol = Math.max(ARROW_W + 8, 14 / view.scale);
+  for (let i = state.arrows.length - 1; i >= 0; i--) {
+    const a = state.arrows[i];
+    if (pointSeg(x, y, a.x1, a.y1, a.x2, a.y2).d <= tol) return a;
+  }
+  return null;
+}
+
 // 文字の当たり判定（中心基準の回転矩形。tolは追加の余白）
 function hitText(x, y, tol = 0) {
   for (let i = state.texts.length - 1; i >= 0; i--) {
@@ -1220,6 +1287,7 @@ function eraseAt(x, y) {
       return Math.abs(l.x) <= p.width / 2 + r && l.y >= top && l.y <= bottom;
     });
     removeFrom(state.furniture, f => furnBorderDist(x, y, f) <= r);
+    removeFrom(state.arrows, a => pointSeg(x, y, a.x1, a.y1, a.x2, a.y2).d <= r + ARROW_W);
   } else {
     eraseStrokeSpan(x, y, r, markHistory);
     removeFrom(state.texts, t => {
@@ -1304,6 +1372,15 @@ function rotateSelection() {
   } else if (selection.kind === 'text') {
     const t = state.texts.find(o => o.id === selection.id);
     if (t) t.angle = ((t.angle || 0) + 90) % 360;
+  } else if (selection.kind === 'arrow') {
+    const a = state.arrows.find(o => o.id === selection.id);
+    if (a) {   // 中点まわりに90°回転（グリッドには丸めない）
+      const cx = (a.x1 + a.x2) / 2, cy = (a.y1 + a.y2) / 2;
+      const r1 = rotatePt(a.x1 - cx, a.y1 - cy, 90);
+      const r2 = rotatePt(a.x2 - cx, a.y2 - cy, 90);
+      a.x1 = cx + r1.x; a.y1 = cy + r1.y;
+      a.x2 = cx + r2.x; a.y2 = cy + r2.y;
+    }
   } else {
     const w = state.walls.find(o => o.id === selection.id);
     if (w) {
@@ -1324,6 +1401,7 @@ function deleteSelection() {
   if (selection.kind === 'part') state.parts = state.parts.filter(o => o.id !== selection.id);
   else if (selection.kind === 'furniture') state.furniture = state.furniture.filter(o => o.id !== selection.id);
   else if (selection.kind === 'text') state.texts = state.texts.filter(o => o.id !== selection.id);
+  else if (selection.kind === 'arrow') state.arrows = state.arrows.filter(o => o.id !== selection.id);
   else state.walls = state.walls.filter(o => o.id !== selection.id);
   selection = null;
   afterMutation();
@@ -1438,6 +1516,7 @@ function computeBBox() {
   for (const w of state.walls) { add(w.x1, w.y1, WALL_W); add(w.x2, w.y2, WALL_W); }
   for (const p of state.parts) add(p.x, p.y, p.width + 10);
   for (const f of state.furniture) add(f.x, f.y, Math.hypot(f.w, f.h) / 2 + FURN_LINE_W);  // 回転対応の外接円
+  for (const a of state.arrows) { add(a.x1, a.y1, ARROW_W); add(a.x2, a.y2, ARROW_HEAD); }
   if (settings.memoVisible) {
     for (const s of state.strokes)
       for (let i = 0; i + 1 < s.points.length; i += 2) add(s.points[i], s.points[i + 1], s.width);
