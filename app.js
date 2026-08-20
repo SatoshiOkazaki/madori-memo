@@ -14,8 +14,9 @@
  *   9. 入力処理（Pointer Events）
  *  10. ツール実装
  *  11. PNG書き出し
- *  12. UI（ツールバー）
- *  13. 初期化
+ *  12. ファイル（名前を付けて保存）
+ *  13. UI（ツールバー）
+ *  14. 初期化
  * ===================================================================== */
 
 /* ===== 1. 定数 ===== */
@@ -248,6 +249,7 @@ function pushHistory() {
   undoStack.push(snapshot());
   if (undoStack.length > HISTORY_MAX) undoStack.shift();
   redoStack.length = 0;
+  dirty = true;
   updateToolbar();
 }
 function undo() {
@@ -255,6 +257,7 @@ function undo() {
   redoStack.push(snapshot());
   state = JSON.parse(undoStack.pop());
   selection = null;
+  dirty = true;
   afterMutation();
 }
 function redo() {
@@ -262,6 +265,7 @@ function redo() {
   undoStack.push(snapshot());
   state = JSON.parse(redoStack.pop());
   selection = null;
+  dirty = true;
   afterMutation();
 }
 function afterMutation() {
@@ -276,10 +280,26 @@ function saveSoon() {                     // デバウンス1秒
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveNow, 1000);
 }
-function saveNow() {
+function saveNow() {                       // 作業中の状態の自動保存（名前付き保存とは別）
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify({ state, view, settings }));
+    localStorage.setItem(STORE_KEY, JSON.stringify({ state, view, settings, doc: currentDoc, dirty }));
   } catch (e) { /* 容量超過などは黙って無視 */ }
+}
+
+const emptyState = () => ({ walls: [], parts: [], strokes: [], furniture: [], texts: [] });
+
+// 旧バージョンのデータに無い配列を補う
+function ensureStateShape() {
+  for (const k of ['walls', 'parts', 'strokes', 'furniture', 'texts'])
+    if (!state[k]) state[k] = [];
+}
+
+// 読み込んだデータのidと重複しないようにidの採番を進める
+function reindexIds() {
+  let maxId = 0;
+  for (const arr of [state.walls, state.parts, state.strokes, state.furniture, state.texts])
+    for (const o of arr) maxId = Math.max(maxId, o.id || 0);
+  idSeq = maxId + 1;
 }
 function loadStored() {
   try {
@@ -287,15 +307,12 @@ function loadStored() {
     if (!raw) return;
     const data = JSON.parse(raw);
     if (data.state) state = data.state;
-    if (!state.furniture) state.furniture = [];   // 旧データ（v1.0）互換
-    if (!state.texts) state.texts = [];           // 旧データ（〜v1.7）互換
+    ensureStateShape();                           // 旧データ（〜v1.7）互換
     if (data.view) view = data.view;
     if (data.settings) settings = Object.assign(settings, data.settings);
-    // idの継続性を確保
-    let maxId = 0;
-    for (const arr of [state.walls, state.parts, state.strokes, state.furniture, state.texts])
-      for (const o of arr) maxId = Math.max(maxId, o.id || 0);
-    idSeq = maxId + 1;
+    if (data.doc) currentDoc = data.doc;          // 開いていた図面を復元
+    dirty = !!data.dirty;
+    reindexIds();
   } catch (e) { /* 壊れたデータは無視して初期状態 */ }
 }
 
@@ -1346,7 +1363,7 @@ function clearAll() {
   if (!confirm('すべての壁・パーツ・メモを削除します。よろしいですか？')) return;
   closeTextEditor(false);
   pushHistory();
-  state = { walls: [], parts: [], strokes: [], furniture: [], texts: [] };
+  state = emptyState();
   selection = null;
   afterMutation();
 }
@@ -1453,7 +1470,8 @@ async function exportPNG() {
   if (!blob) { alert('画像の生成に失敗しました。'); return; }
   const d = new Date();
   const pad2 = n => String(n).padStart(2, '0');
-  const name = `madori-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.png`;
+  const base = currentDoc ? currentDoc.name.replace(/[\\/:*?"<>|]/g, '_') : 'madori';
+  const name = `${base}-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}.png`;
   const file = new File([blob], name, { type: 'image/png' });
 
   if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1472,7 +1490,165 @@ async function exportPNG() {
   setTimeout(() => URL.revokeObjectURL(a.href), 10000);
 }
 
-/* ===== 12. UI（ツールバー） ===== */
+/* ===== 12. ファイル（名前を付けて保存・複数の間取りを管理） =====
+ * 保存先はこの端末のlocalStorage。作業中の自動保存(STORE_KEY)とは別枠で、
+ * DOCS_KEY に [{id, name, updatedAt, data:{state, view}}] を保持する。
+ */
+const DOCS_KEY = 'madori-memo-docs-v1';
+let currentDoc = null;    // 開いている図面 {id, name} | null（未保存の新規図面はnull）
+let dirty = false;        // 名前付き保存以降に変更があるか
+
+function loadDocs() {
+  try { return JSON.parse(localStorage.getItem(DOCS_KEY)) || []; }
+  catch (e) { return []; }
+}
+function storeDocs(docs) {
+  try {
+    localStorage.setItem(DOCS_KEY, JSON.stringify(docs));
+    return true;
+  } catch (e) {
+    alert('保存できませんでした。端末の空き容量が不足している可能性があります。');
+    return false;
+  }
+}
+const docSnapshot = () => ({ state: JSON.parse(snapshot()), view: { ...view } });
+
+function confirmDiscard() {
+  return !dirty || confirm('保存していない変更があります。破棄して進めますか？');
+}
+
+function saveAsDoc(name) {
+  const docs = loadDocs();
+  const doc = {
+    id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name, updatedAt: Date.now(), data: docSnapshot(),
+  };
+  docs.unshift(doc);
+  if (!storeDocs(docs)) return false;
+  currentDoc = { id: doc.id, name: doc.name };
+  dirty = false;
+  saveNow();
+  updateToolbar();
+  return true;
+}
+
+function overwriteDoc() {
+  if (!currentDoc) return false;
+  const docs = loadDocs();
+  const d = docs.find(o => o.id === currentDoc.id);
+  if (!d) return false;                      // 削除済みなどで保存先が無い
+  d.updatedAt = Date.now();
+  d.data = docSnapshot();
+  if (!storeDocs(docs)) return true;         // 失敗は通知済み
+  dirty = false;
+  saveNow();
+  updateToolbar();
+  return true;
+}
+
+function openDoc(id) {
+  const doc = loadDocs().find(o => o.id === id);
+  if (!doc || !confirmDiscard()) return;
+  closeTextEditor(false);
+  state = doc.data.state;
+  ensureStateShape();
+  if (doc.data.view) view = { ...doc.data.view };
+  selection = null;
+  undoStack.length = 0; redoStack.length = 0;   // 別の図面の履歴に戻れてしまわないよう消す
+  currentDoc = { id: doc.id, name: doc.name };
+  dirty = false;
+  reindexIds();
+  saveNow();
+  updateToolbar();
+  requestRender();
+}
+
+function newDoc() {
+  if (!confirmDiscard()) return;
+  closeTextEditor(false);
+  state = emptyState();
+  selection = null;
+  undoStack.length = 0; redoStack.length = 0;
+  currentDoc = null;
+  dirty = false;
+  resetView();
+  saveNow();
+  updateToolbar();
+  requestRender();
+}
+
+function deleteDoc(id) {
+  const docs = loadDocs().filter(o => o.id !== id);
+  if (!storeDocs(docs)) return;
+  if (currentDoc && currentDoc.id === id) {   // 開いていた図面が消えたら未保存扱いに
+    currentDoc = null;
+    dirty = true;
+    saveNow();
+    updateToolbar();
+  }
+}
+
+/* --- ファイルシート --- */
+function openFileSheet() {
+  closeTextEditor(true);
+  $('docNameInput').value = currentDoc ? currentDoc.name : '';
+  $('btnOverwrite').disabled = !currentDoc;
+  renderDocList();
+  $('fileSheet').hidden = false;
+}
+function closeFileSheet() { $('fileSheet').hidden = true; }
+
+function formatStamp(ms) {
+  const d = new Date(ms);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function renderDocList() {
+  const ul = $('docList');
+  ul.textContent = '';
+  const docs = loadDocs().sort((a, b) => b.updatedAt - a.updatedAt);
+  if (!docs.length) {
+    const li = document.createElement('li');
+    li.className = 'doc-empty';
+    li.textContent = '保存された間取りはまだありません';
+    ul.appendChild(li);
+    return;
+  }
+  for (const d of docs) {
+    const li = document.createElement('li');
+    li.className = 'doc-item' + (currentDoc && currentDoc.id === d.id ? ' current' : '');
+    const info = document.createElement('div');
+    info.className = 'doc-info';
+    const nm = document.createElement('div');
+    nm.className = 'doc-name';
+    nm.textContent = d.name;
+    const dt = document.createElement('div');
+    dt.className = 'doc-date';
+    dt.textContent = formatStamp(d.updatedAt);
+    info.append(nm, dt);
+    const open = document.createElement('button');
+    open.type = 'button'; open.className = 'tb'; open.textContent = '開く';
+    open.addEventListener('click', () => { openDoc(d.id); closeFileSheet(); });
+    const del = document.createElement('button');
+    del.type = 'button'; del.className = 'tb danger'; del.textContent = '削除';
+    del.addEventListener('click', () => {
+      if (!confirm(`「${d.name}」を削除します。よろしいですか？`)) return;
+      deleteDoc(d.id);
+      renderDocList();
+    });
+    li.append(info, open, del);
+    ul.appendChild(li);
+  }
+}
+
+function saveAsFromSheet() {
+  const name = $('docNameInput').value.trim();
+  if (!name) { alert('名前を入力してください。'); return; }
+  if (saveAsDoc(name)) closeFileSheet();
+}
+
+/* ===== 13. UI（ツールバー） ===== */
 const $ = id => document.getElementById(id);
 const wallToolBtns = [...document.querySelectorAll('[data-walltool]')];
 const wallStyleBtns = [...document.querySelectorAll('[data-wallstyle]')];
@@ -1527,6 +1703,7 @@ function updateToolbar() {
   $('btnDelete').disabled = !selection;
   $('btnGrid').classList.toggle('active', settings.grid);
   $('btnMemoVis').classList.toggle('active', settings.memoVisible);
+  $('docName').textContent = (currentDoc ? currentDoc.name : '名称未設定') + (dirty ? ' •' : '');
 }
 
 function bindUI() {
@@ -1578,6 +1755,20 @@ function bindUI() {
   $('btnExport').addEventListener('click', exportPNG);
   $('btnClear').addEventListener('click', clearAll);
 
+  // ファイル（名前を付けて保存）
+  $('btnFile').addEventListener('click', openFileSheet);
+  $('btnSheetClose').addEventListener('click', closeFileSheet);
+  $('fileSheet').addEventListener('click', e => { if (e.target === $('fileSheet')) closeFileSheet(); });
+  $('btnSaveAs').addEventListener('click', saveAsFromSheet);
+  $('docNameInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); saveAsFromSheet(); }
+  });
+  $('btnOverwrite').addEventListener('click', () => {
+    if (overwriteDoc()) closeFileSheet();
+    else alert('保存先が見つかりませんでした。名前を付けて保存してください。');
+  });
+  $('btnNewDoc').addEventListener('click', () => { newDoc(); closeFileSheet(); });
+
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
@@ -1597,7 +1788,7 @@ function bindUI() {
   document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
 }
 
-/* ===== 13. 初期化 ===== */
+/* ===== 14. 初期化 ===== */
 function init() {
   loadStored();
   bindUI();

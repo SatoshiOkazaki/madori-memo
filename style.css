@@ -128,6 +128,110 @@ button.tb.swatch.active {
   box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 
+/* 現在開いている図面名（未保存の変更があると「•」が付く） */
+.tb-doc {
+  padding: 0 10px;
+  font-size: 13px;
+  color: var(--muted);
+  max-width: 40vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== ファイルシート ===== */
+.sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(17, 24, 39, 0.35);
+}
+.sheet[hidden] { display: none; }
+
+.sheet-panel {
+  width: min(560px, 100%);
+  max-height: min(80vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  background: var(--bg);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+
+.sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 16px;
+}
+
+.sheet-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.sheet-row input {
+  flex: 1 1 200px;
+  min-height: var(--tb-h);
+  padding: 0 12px;
+  font-size: 16px;      /* iOSで入力時に拡大されないよう16px以上 */
+  font-family: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.sheet-row input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+button.tb.primary {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+button.tb.primary:active { background: #1d4ed8; }
+
+.sheet-list-title {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.doc-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.doc-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.doc-item.current { background: var(--accent-bg); border-radius: 8px; }
+.doc-info { flex: 1; min-width: 0; }
+.doc-name {
+  font-size: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.doc-date { font-size: 12px; color: var(--muted); }
+.doc-empty { padding: 14px 4px; font-size: 14px; color: var(--muted); }
+
 /* 文字入力の一時オーバーレイ（キャンバス上のその場に出す） */
 #stage .text-editor {
   position: absolute;

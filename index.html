@@ -89,7 +89,33 @@
       <button id="btnExport" class="tb" type="button">画像で保存</button>
       <button id="btnClear" class="tb danger" type="button">全消去</button>
     </div>
+
+    <!-- ファイル（名前を付けて保存） -->
+    <div class="tb-group" role="group" aria-label="ファイル">
+      <button id="btnFile" class="tb" type="button">ファイル</button>
+      <span id="docName" class="tb-doc">名称未設定</span>
+    </div>
   </header>
+
+  <!-- ===== ファイルシート ===== -->
+  <div id="fileSheet" class="sheet" hidden>
+    <div class="sheet-panel" role="dialog" aria-label="ファイル">
+      <div class="sheet-head">
+        <strong>ファイル</strong>
+        <button id="btnSheetClose" class="tb" type="button">閉じる</button>
+      </div>
+      <div class="sheet-row">
+        <input id="docNameInput" type="text" placeholder="間取り図の名前" autocomplete="off">
+        <button id="btnSaveAs" class="tb primary" type="button">名前を付けて保存</button>
+      </div>
+      <div class="sheet-row">
+        <button id="btnOverwrite" class="tb" type="button">上書き保存</button>
+        <button id="btnNewDoc" class="tb" type="button">新規作成</button>
+      </div>
+      <div class="sheet-list-title">保存済みの間取り</div>
+      <ul id="docList" class="doc-list"></ul>
+    </div>
+  </div>
 
   <!-- ===== キャンバス ===== -->
   <main id="stage">
